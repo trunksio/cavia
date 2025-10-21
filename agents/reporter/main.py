@@ -82,52 +82,43 @@ class ReporterAgent(BaseAgent):
         {
             "task_type": "generate_report",
             "payload": {
-                "job_id": "uuid"
+                "job_id": "uuid",
+                "parsed_cv": ParsedCV.dict(),
+                "storage_path": "path/to/parsed_cv.json",
+                "evaluations": [EvaluationResult.dict(), ...]
             }
         }
         """
         start_time = time.time()
 
         try:
+            # Extract task parameters from payload (event-driven, no DB fetch)
+            job_id = task.payload["job_id"]
+            parsed_cv = task.payload["parsed_cv"]
+            storage_path = task.payload.get("storage_path")
+            evaluations = task.payload["evaluations"]
+
             self.logger.info(
                 "Starting report generation",
                 task_id=task.task_id,
-                job_id=task.payload.get("job_id"),
+                job_id=job_id,
+                evaluations_count=len(evaluations),
             )
 
-            # Extract task parameters
-            job_id = task.payload["job_id"]
-
-            # Fetch job data
-            job_data = self._fetch_job_data(job_id)
-            parsed_cv = job_data["parsed_cv"]
-            criteria = job_data["criteria"]
-
-            # Fetch evaluation results
-            evaluations = self._fetch_evaluations(job_id)
-
             if not evaluations:
-                raise ValueError("No evaluations found for job")
+                raise ValueError("No evaluations provided in task payload")
+
+            # Load criteria for report context
+            criteria = self._load_active_criteria()
 
             # Generate report using LLM
             report_data = self._generate_report_with_llm(parsed_cv, evaluations, criteria)
 
-            # Create CVEvaluationReport object
-            candidate_name = parsed_cv.get("contact_info", {}).get("name", "Unknown")
-
-            report = CVEvaluationReport(
-                job_id=job_id,
-                candidate_name=candidate_name,
-                overall_score=report_data["overall_score"],
-                recommendation=report_data["recommendation"],
-                summary=report_data["summary"],
-                strengths=report_data.get("strengths", []),
-                concerns=report_data.get("concerns", []),
-                detailed_analysis=report_data["rationale"],
-                evaluation_results=evaluations,
-            )
+            # Calculate weighted overall score
+            overall_score = self._calculate_weighted_score(evaluations, criteria)
 
             # Generate markdown report
+            candidate_name = parsed_cv.get("contact_info", {}).get("name", "Unknown")
             markdown_report = format_markdown_report(
                 candidate_name=candidate_name,
                 report_data=report_data,
@@ -135,11 +126,20 @@ class ReporterAgent(BaseAgent):
                 criteria=criteria,
             )
 
-            # Store report in database
-            self._store_report(job_id, report)
-
             # Store markdown in MinIO
-            storage_path = self._store_markdown_report(job_id, markdown_report)
+            markdown_path = self._store_markdown_report(job_id, markdown_report)
+
+            # Prepare final report data for db-writer
+            final_report = {
+                "job_id": job_id,
+                "overall_score": overall_score,
+                "decision": report_data["recommendation"],
+                "decision_reasoning": report_data["rationale"],
+                "summary": report_data["summary"],
+                "strengths": report_data.get("strengths", []),
+                "concerns": report_data.get("concerns", []),
+                "markdown_path": markdown_path,
+            }
 
             execution_time = time.time() - start_time
 
@@ -147,10 +147,13 @@ class ReporterAgent(BaseAgent):
                 "Report generation completed successfully",
                 task_id=task.task_id,
                 job_id=job_id,
-                recommendation=report.recommendation,
-                overall_score=report.overall_score,
+                decision=report_data["recommendation"],
+                overall_score=overall_score,
                 execution_time=execution_time,
             )
+
+            # Enqueue to db-writer for final persistence
+            self._enqueue_to_db_writer(job_id, final_report, task)
 
             return AgentTaskResult(
                 task_id=task.task_id,
@@ -158,8 +161,9 @@ class ReporterAgent(BaseAgent):
                 status="success",
                 result={
                     "job_id": job_id,
-                    "report": report.dict(),
-                    "storage_path": storage_path,
+                    "overall_score": overall_score,
+                    "decision": report_data["recommendation"],
+                    "markdown_path": markdown_path,
                 },
                 execution_time=execution_time,
             )
@@ -183,99 +187,64 @@ class ReporterAgent(BaseAgent):
                 execution_time=execution_time,
             )
 
-    def _fetch_job_data(self, job_id: str) -> Dict[str, Any]:
-        """Fetch job data including parsed CV and criteria"""
+    def _load_active_criteria(self) -> List[Dict[str, Any]]:
+        """Load all active evaluation criteria from database"""
         try:
             with self.db.get_session() as session:
                 from sqlalchemy import text
 
                 query = text("""
-                    SELECT metadata
-                    FROM cv_jobs
-                    WHERE job_id = :job_id
-                """)
-
-                result = session.execute(query, {"job_id": job_id}).fetchone()
-
-                if not result:
-                    raise ValueError(f"Job not found: {job_id}")
-
-                metadata = result[0]
-
-                if "parsed_cv" not in metadata:
-                    raise ValueError("ParsedCV not found in job metadata")
-
-                # Fetch criteria from evaluation_criteria table
-                criteria_query = text("""
-                    SELECT criterion_id, name, description, evaluation_prompt, weight, metadata
+                    SELECT criterion_id, name, description, evaluation_prompt, weight
                     FROM evaluation_criteria
                     WHERE is_active = true
                     ORDER BY weight DESC
                 """)
 
-                criteria_results = session.execute(criteria_query).fetchall()
+                result = session.execute(query)
+                criteria = []
 
-                criteria = [
-                    {
+                for row in result:
+                    criteria.append({
                         "criterion_id": row[0],
                         "name": row[1],
                         "description": row[2],
                         "evaluation_prompt": row[3],
-                        "weight": float(row[4]),
-                        "metadata": row[5],
-                    }
-                    for row in criteria_results
-                ]
+                        "weight": row[4],
+                    })
 
-                return {
-                    "parsed_cv": metadata["parsed_cv"],
-                    "criteria": criteria,
-                }
+                return criteria
 
         except Exception as e:
-            self.logger.error("Failed to fetch job data", job_id=job_id, error=str(e))
+            self.logger.error("Failed to load evaluation criteria", error=str(e))
             raise
 
-    def _fetch_evaluations(self, job_id: str) -> List[Dict[str, Any]]:
-        """Fetch all evaluation results for the job"""
-        try:
-            with self.db.get_session() as session:
-                from sqlalchemy import text
+    def _calculate_weighted_score(
+        self,
+        evaluations: List[Dict[str, Any]],
+        criteria: List[Dict[str, Any]]
+    ) -> float:
+        """Calculate weighted overall score from evaluations"""
+        # Create criterion_id -> weight mapping
+        weights = {c["criterion_id"]: c["weight"] for c in criteria}
 
-                query = text("""
-                    SELECT
-                        criterion_id,
-                        agent_id,
-                        score,
-                        confidence,
-                        evidence,
-                        reasoning,
-                        metadata
-                    FROM cv_evaluations
-                    WHERE job_id = :job_id
-                    ORDER BY created_at ASC
-                """)
+        # Calculate weighted score
+        total_weighted_score = 0.0
+        total_weight = 0.0
 
-                results = session.execute(query, {"job_id": job_id}).fetchall()
+        for eval in evaluations:
+            criterion_id = eval["criterion_id"]
+            score = eval["score"]
+            weight = weights.get(criterion_id, 1.0)
 
-                evaluations = [
-                    {
-                        "criterion_id": row[0],
-                        "agent_id": row[1],
-                        "score": float(row[2]),
-                        "confidence": float(row[3]),
-                        "evidence": row[4],
-                        "reasoning": row[5],
-                        "metadata": row[6] or {},
-                    }
-                    for row in results
-                ]
+            total_weighted_score += score * weight
+            total_weight += weight
 
-                return evaluations
+        # Avoid division by zero
+        if total_weight == 0:
+            return 0.0
 
-        except Exception as e:
-            self.logger.error("Failed to fetch evaluations", job_id=job_id, error=str(e))
-            raise
+        overall_score = total_weighted_score / total_weight
+        return round(overall_score, 2)
 
     def _generate_report_with_llm(
         self,
@@ -375,36 +344,46 @@ class ReporterAgent(BaseAgent):
         if not isinstance(score, (int, float)) or not (0 <= score <= 100):
             raise ValueError(f"Overall score must be between 0-100, got: {score}")
 
-    def _store_report(self, job_id: str, report: CVEvaluationReport):
-        """Store report in database"""
+    def _enqueue_to_db_writer(
+        self,
+        job_id: str,
+        final_report: Dict[str, Any],
+        task: AgentTask
+    ):
+        """Enqueue to db-writer worker for final database persistence"""
         try:
-            with self.db.get_session() as session:
-                from sqlalchemy import text
+            import uuid
+            from rq import Queue
 
-                query = text("""
-                    UPDATE cv_jobs
-                    SET metadata = jsonb_set(
-                        COALESCE(metadata, '{}'),
-                        '{report}',
-                        :report::jsonb
-                    )
-                    WHERE job_id = :job_id
-                """)
+            # Create db-writer queue
+            db_queue = Queue("db-writer", connection=self.redis_conn)
 
-                session.execute(
-                    query,
-                    {
-                        "job_id": job_id,
-                        "report": report.model_dump_json(),
-                    }
-                )
-                session.commit()
+            # Create update_job_result task
+            task_dict = {
+                "task_id": str(uuid.uuid4()),
+                "task_type": "update_job_result",
+                "payload": {
+                    "job_id": job_id,
+                    "status": "completed",
+                    "result": final_report,
+                },
+                "intent": task.intent,
+                "steps_completed": task.steps_completed + [self.get_agent_type()],
+            }
 
-            self.logger.debug("Report stored in database", job_id=job_id)
+            # Enqueue to db-writer (non-agentic worker)
+            job = db_queue.enqueue(
+                "db_writer.process_db_task",
+                task_dict,
+                job_timeout='5m',
+                result_ttl=3600,
+            )
+
+            self.logger.info("Enqueued to db-writer", job_id=job_id, rq_job_id=job.id)
 
         except Exception as e:
-            self.logger.error("Failed to store report in database", error=str(e))
-            raise
+            self.logger.error("Failed to enqueue to db-writer", job_id=job_id, error=str(e))
+            # Don't raise - report generation was successful
 
     def _store_markdown_report(self, job_id: str, markdown: str) -> str:
         """Store markdown report in MinIO"""

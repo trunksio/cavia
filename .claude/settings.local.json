@@ -35,7 +35,13 @@
       "Bash(docker compose:*)",
       "Bash(docker stop:*)",
       "Bash(docker rm:*)",
-      "Bash(docker rmi:*)"
+      "Bash(docker rmi:*)",
+      "Bash(docker exec:*)",
+      "Bash(awk:*)",
+      "Bash(xargs:*)",
+      "Bash(docker build:*)",
+      "Bash(docker logs:*)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []

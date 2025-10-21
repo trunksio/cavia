@@ -123,6 +123,8 @@ class AgentTask(BaseModel):
     task_id: str
     task_type: str
     payload: Dict[str, Any]
+    intent: str = Field(default="", description="Original intent/goal for this task chain")
+    steps_completed: list[str] = Field(default_factory=list, description="List of agent types that have processed this task")
     metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -137,3 +139,87 @@ class AgentTaskResult(BaseModel):
     error: Optional[str] = None
     execution_time: Optional[float] = None
     completed_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ============================================================================
+# Structured Evaluation Models (for Instructor-based LLM evaluation)
+# ============================================================================
+
+
+class ReasoningStep(BaseModel):
+    """A single step in Chain-of-Thought reasoning"""
+
+    step_number: int = Field(..., description="Step number in the reasoning chain")
+    observation: str = Field(..., description="What was observed in the CV data")
+    analysis: str = Field(..., description="Analysis of this observation")
+
+
+class SubCriterion(BaseModel):
+    """Atomic sub-criterion evaluation"""
+
+    name: str = Field(..., description="Name of the sub-criterion")
+    description: str = Field(..., description="What this sub-criterion measures")
+    score: int = Field(..., ge=1, le=5, description="Score from 1 (poor) to 5 (excellent)")
+    evidence: str = Field(..., description="Specific evidence from CV supporting this score")
+    reasoning: str = Field(..., description="Brief explanation of the score")
+
+
+class StructuredEvaluation(BaseModel):
+    """
+    Complete structured evaluation with Chain-of-Thought reasoning.
+
+    This model is used with Instructor library for automatic validation
+    and structured output from LLM evaluations.
+    """
+
+    # Chain-of-Thought Reasoning
+    reasoning_steps: List[ReasoningStep] = Field(
+        ...,
+        min_length=3,
+        max_length=7,
+        description="Chain-of-Thought reasoning steps (3-7 steps)"
+    )
+
+    # Atomic Criteria Breakdown
+    sub_criteria: List[SubCriterion] = Field(
+        ...,
+        min_length=2,
+        max_length=6,
+        description="Atomic breakdown of the criterion (2-6 sub-criteria)"
+    )
+
+    # Overall Evaluation
+    overall_score: int = Field(
+        ...,
+        ge=0,
+        le=100,
+        description="Overall score 0-100 (calculated from sub-criteria)"
+    )
+
+    confidence: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Confidence in this evaluation (0.0-1.0)"
+    )
+
+    key_strengths: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=5,
+        description="1-5 key strengths identified"
+    )
+
+    key_weaknesses: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=5,
+        description="1-5 key weaknesses identified"
+    )
+
+    summary: str = Field(
+        ...,
+        min_length=50,
+        max_length=500,
+        description="Summary of the evaluation (50-500 chars)"
+    )

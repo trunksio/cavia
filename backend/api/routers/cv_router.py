@@ -18,9 +18,11 @@ from cavia_common import (
     get_logger,
     get_minio_client,
     get_db_manager,
-    get_redis_client,
+    get_redis_connection,
     AgentTask,
 )
+
+from rq import Queue
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -131,64 +133,37 @@ async def upload_cv(
 
         logger.info("Job created in database", job_id=job_id)
 
-        # Trigger orchestrator workflow
-        redis_client = get_redis_client()
-        orchestrator_queue = redis_client.get_queue("orchestrator")
+        # Enqueue directly to parser queue (skip orchestrator)
+        redis_conn = get_redis_connection()
+        parser_queue = Queue("cv-parsing", connection=redis_conn)
 
-        # Fetch evaluation criteria
-        with db.get_session() as session:
-            criteria_query = text("""
-                SELECT
-                    criterion_id,
-                    name,
-                    description,
-                    evaluation_prompt,
-                    weight,
-                    metadata
-                FROM evaluation_criteria
-                WHERE is_active = true
-                ORDER BY weight DESC
-            """)
-
-            criteria_results = session.execute(criteria_query).fetchall()
-
-            criteria = [
-                {
-                    "criterion_id": row[0],
-                    "name": row[1],
-                    "description": row[2],
-                    "evaluation_prompt": row[3],
-                    "weight": float(row[4]),
-                    "metadata": row[5] or {},
-                }
-                for row in criteria_results
-            ]
-
-        # Create orchestrator task
-        orchestrator_task = AgentTask(
+        # Create parser task with intent
+        parser_task = AgentTask(
             task_id=str(uuid.uuid4()),
-            task_type="start_cv_job",
+            task_type="parse_cv",
             payload={
                 "job_id": job_id,
                 "filename": file.filename,
                 "minio_bucket": "cvs-raw",
                 "minio_path": minio_path,
-                "evaluation_criteria": criteria,
-            }
+            },
+            intent="Process CV and determine acceptance",
+            steps_completed=[],  # Start of agent chain
         )
 
         # Enqueue task
-        rq_job = orchestrator_queue.enqueue(
+        rq_job = parser_queue.enqueue(
             "cavia_common.base_agent.process_agent_task",
-            orchestrator_task.dict(),
+            parser_task.model_dump(),
             job_timeout='30m',
             result_ttl=3600,
         )
 
         logger.info(
-            "Orchestrator task enqueued",
+            "Parser task enqueued directly (AOA)",
             job_id=job_id,
-            rq_job_id=rq_job.id
+            rq_job_id=rq_job.id,
+            intent=parser_task.intent,
         )
 
         return CVUploadResponse(

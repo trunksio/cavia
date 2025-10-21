@@ -127,9 +127,12 @@ class DatabaseManager:
     def find_agents_by_capability(
         self, capability_query: str, limit: int = 10
     ) -> List[Dict[str, Any]]:
-        """Find agents by semantic similarity to capability query"""
-        # This would use semantic_embedding for similarity search
-        # For now, simple query
+        """
+        Find agents by semantic similarity to capability query.
+
+        Note: This is a simplified version that doesn't use embeddings yet.
+        For semantic search, use search_agents_by_capability with embedding vector.
+        """
         try:
             with self.get_session() as session:
                 agents = (
@@ -152,6 +155,56 @@ class DatabaseManager:
                 ]
         except Exception as e:
             logger.error("Failed to find agents", error=str(e))
+            return []
+
+    def search_agents_by_capability(
+        self, query_embedding, limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Search agents using vector similarity on semantic embeddings.
+
+        Args:
+            query_embedding: numpy array or list of floats (384-dim)
+            limit: Maximum number of results to return
+
+        Returns:
+            List of agent dictionaries sorted by similarity (best match first)
+        """
+        try:
+            with self.get_session() as session:
+                from sqlalchemy import text
+
+                # Convert embedding to string format for pgvector
+                embedding_str = '[' + ','.join(str(x) for x in query_embedding) + ']'
+
+                # Use pgvector's <=> operator for cosine distance
+                query = text("""
+                    SELECT agent_id, agent_type, name, description, queue_name, capabilities,
+                           semantic_embedding <=> CAST(:embedding AS vector) AS distance
+                    FROM agent_registry
+                    WHERE status = 'active'
+                    ORDER BY distance
+                    LIMIT :limit
+                """)
+
+                result = session.execute(query, {"embedding": embedding_str, "limit": limit})
+
+                agents = []
+                for row in result:
+                    agents.append({
+                        "agent_id": row[0],
+                        "agent_type": row[1],
+                        "name": row[2],
+                        "description": row[3],
+                        "queue_name": row[4],
+                        "capabilities": row[5],
+                        "similarity_score": 1.0 - row[6]  # Convert distance to similarity
+                    })
+
+                return agents
+
+        except Exception as e:
+            logger.error("Failed to search agents by capability", error=str(e))
             return []
 
     def update_heartbeat(self, agent_id: str) -> bool:

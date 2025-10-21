@@ -64,9 +64,9 @@ class Settings(BaseSettings):
 
     # Queue Names
     queue_orchestration: str = Field(default="orchestrator")
-    queue_parsing: str = Field(default="parser")
-    queue_evaluation: str = Field(default="evaluator")
-    queue_reporting: str = Field(default="reporter")
+    queue_parsing: str = Field(default="cv-parsing")
+    queue_evaluation: str = Field(default="cv-evaluation")
+    queue_reporting: str = Field(default="cv-reporting")
 
     # Embedding Model
     embedding_model: str = Field(default="all-MiniLM-L6-v2")

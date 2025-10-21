@@ -13,11 +13,13 @@ import sys
 
 from sentence_transformers import SentenceTransformer
 
+from rq import Queue, Worker
+
 from .config import get_settings
 from .logging import get_logger, setup_logging
 from .models import AgentRegistration, AgentStatus, AgentTask, AgentTaskResult
 from .database import get_db_manager
-from .redis_client import get_redis_client
+from .redis_client import get_redis_connection
 
 
 class BaseAgent(ABC):
@@ -40,17 +42,29 @@ class BaseAgent(ABC):
 
         # Clients
         self.db = get_db_manager()
-        self.redis = get_redis_client()
+        self.redis_conn = get_redis_connection()  # Direct Redis connection for RQ
 
         # State
         self.status = AgentStatus.STARTING
         self.heartbeat_thread: Optional[Thread] = None
         self.running = False
 
-        # Embedding model for semantic descriptions
-        self.embedding_model = SentenceTransformer(self.settings.embedding_model)
+        # Embedding model for semantic descriptions (lazy-loaded)
+        self._embedding_model: Optional[SentenceTransformer] = None
 
         self.logger.info("Agent initialized", agent_id=self.agent_id)
+
+    def _get_embedding_model(self) -> SentenceTransformer:
+        """
+        Lazy-load the sentence transformers embedding model.
+
+        Only loads the model when actually needed (registration or discovery),
+        preventing issues in RQ worker forked processes that don't use it.
+        """
+        if self._embedding_model is None:
+            self.logger.info("Loading sentence transformers model", model=self.settings.embedding_model)
+            self._embedding_model = SentenceTransformer(self.settings.embedding_model)
+        return self._embedding_model
 
     @abstractmethod
     def get_agent_type(self) -> str:
@@ -85,9 +99,9 @@ class BaseAgent(ABC):
         try:
             info = self.get_agent_info()
 
-            # Generate semantic embedding
+            # Generate semantic embedding (lazy-loads model on first use)
             description = f"{info['name']}: {info['description']}"
-            embedding = self.embedding_model.encode(description)
+            embedding = self._get_embedding_model().encode(description)
 
             # Create registration
             registration = AgentRegistration(
@@ -176,14 +190,13 @@ class BaseAgent(ABC):
             # Register this agent instance for RQ job processing
             register_agent_instance(self)
 
-            # Start RQ worker
+            # Start RQ worker - use RQ directly
             queue_name = self.get_queue_name()
             self.logger.info("Starting worker", queue=queue_name, agent_id=self.agent_id)
 
-            worker = self.redis.start_worker(
-                queue_names=[queue_name],
-                name=self.agent_id,
-            )
+            # Create queue and worker using RQ directly
+            queue = Queue(queue_name, connection=self.redis_conn)
+            worker = Worker([queue], connection=self.redis_conn, name=self.agent_id)
 
             # Work loop
             worker.work()
@@ -211,6 +224,112 @@ class BaseAgent(ABC):
             "status": self.status.value,
             "queue": self.get_queue_name(),
         }
+
+    def discover_next_agent(self, capability_query: str) -> Optional[Dict[str, str]]:
+        """
+        Discover the next agent to handle a capability using semantic search.
+
+        Args:
+            capability_query: Natural language description of needed capability
+                             (e.g., "evaluate CV against criteria")
+
+        Returns:
+            Dict with 'agent_type' and 'queue_name', or None if not found
+        """
+        try:
+            # Generate embedding for the capability query (lazy-loads model on first use)
+            query_embedding = self._get_embedding_model().encode(capability_query)
+
+            # Search semantic registry for best match
+            agent_info = self.db.search_agents_by_capability(
+                query_embedding=query_embedding,
+                limit=1
+            )
+
+            if agent_info:
+                best_match = agent_info[0]
+                self.logger.info(
+                    "Discovered next agent",
+                    capability=capability_query,
+                    agent_type=best_match['agent_type'],
+                    queue=best_match['queue_name']
+                )
+                return {
+                    "agent_type": best_match['agent_type'],
+                    "queue_name": best_match['queue_name']
+                }
+            else:
+                self.logger.warning("No agent found for capability", capability=capability_query)
+                return None
+
+        except Exception as e:
+            self.logger.error("Failed to discover next agent", capability=capability_query, error=str(e))
+            return None
+
+    def enqueue_to_next_agent(
+        self,
+        capability_query: str,
+        task_type: str,
+        payload: Dict[str, Any],
+        intent: str,
+        steps_completed: list[str]
+    ) -> Optional[str]:
+        """
+        Discover and enqueue task to the next agent in the chain.
+
+        Args:
+            capability_query: What capability is needed next
+            task_type: Type of task for the next agent
+            payload: Task payload data
+            intent: Original intent being fulfilled
+            steps_completed: List of agent types that have already processed this
+
+        Returns:
+            RQ job ID if successful, None otherwise
+        """
+        try:
+            import uuid
+            from rq import Queue
+
+            # Discover next agent
+            next_agent = self.discover_next_agent(capability_query)
+            if not next_agent:
+                raise Exception(f"No agent found for capability: {capability_query}")
+
+            # Update steps_completed with current agent type
+            updated_steps = steps_completed + [self.get_agent_type()]
+
+            # Create task
+            task_dict = {
+                "task_id": str(uuid.uuid4()),
+                "task_type": task_type,
+                "payload": payload,
+                "intent": intent,
+                "steps_completed": updated_steps,
+            }
+
+            # Enqueue to discovered agent's queue
+            queue = Queue(next_agent['queue_name'], connection=self.redis_conn)
+            job = queue.enqueue(
+                "cavia_common.base_agent.process_agent_task",
+                task_dict,
+                job_timeout='15m',
+                result_ttl=3600,
+            )
+
+            self.logger.info(
+                "Enqueued to next agent",
+                next_agent_type=next_agent['agent_type'],
+                queue=next_agent['queue_name'],
+                job_id=job.id,
+                intent=intent
+            )
+
+            return job.id
+
+        except Exception as e:
+            self.logger.error("Failed to enqueue to next agent", error=str(e))
+            return None
 
 
 # Global agent registry for RQ workers

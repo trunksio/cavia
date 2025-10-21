@@ -146,6 +146,9 @@ class ParserAgent(BaseAgent):
                     execution_time=execution_time,
                 )
 
+                # Discover and enqueue to next agent (evaluator)
+                self._enqueue_to_evaluator(job_id, parsed_cv, storage_path, task)
+
                 return AgentTaskResult(
                     task_id=task.task_id,
                     agent_id=self.agent_id,
@@ -267,7 +270,7 @@ class ParserAgent(BaseAgent):
                     SET metadata = jsonb_set(
                         COALESCE(metadata, '{}'),
                         '{parsed_cv}',
-                        :parsed_cv::jsonb
+                        CAST(:parsed_cv AS jsonb)
                     )
                     WHERE job_id = :job_id
                 """)
@@ -312,6 +315,33 @@ class ParserAgent(BaseAgent):
         except Exception as e:
             self.logger.error("Failed to store ParsedCV in MinIO", error=str(e))
             raise
+
+    def _enqueue_to_evaluator(self, job_id: str, parsed_cv: ParsedCV, storage_path: str, task: AgentTask):
+        """Discover and enqueue to evaluator agent using semantic discovery"""
+        try:
+            import json
+
+            # Use semantic discovery to find evaluator agent
+            job_id_result = self.enqueue_to_next_agent(
+                capability_query="evaluate CV against job criteria and acceptance standards",
+                task_type="evaluate_cv",
+                payload={
+                    "job_id": job_id,
+                    "parsed_cv": json.loads(parsed_cv.model_dump_json()),
+                    "storage_path": storage_path,
+                },
+                intent=task.intent or "Process CV and determine acceptance",
+                steps_completed=task.steps_completed
+            )
+
+            if job_id_result:
+                self.logger.info("Enqueued to evaluator via semantic discovery", job_id=job_id, rq_job_id=job_id_result)
+            else:
+                self.logger.warning("Failed to enqueue to evaluator", job_id=job_id)
+
+        except Exception as e:
+            self.logger.error("Failed to enqueue to evaluator", job_id=job_id, error=str(e))
+            # Don't raise - parsing was successful even if enqueueing failed
 
 
 def main():

@@ -1,24 +1,34 @@
 """
-LLM prompt templates for CV evaluation
+LLM prompt templates for CV evaluation with Chain-of-Thought reasoning
 """
 
 SYSTEM_PROMPT = """You are an expert HR professional evaluating CVs against specific criteria.
 
-Your task is to:
-1. Carefully analyze the CV data provided
-2. Evaluate it against the given criterion
-3. Provide a score from 0-100 where:
-   - 0-20: Poor/Minimal fit
-   - 21-40: Below average
-   - 41-60: Average/Acceptable
-   - 61-80: Good/Strong fit
-   - 81-100: Excellent/Outstanding fit
-4. Provide a confidence score from 0-1 indicating how certain you are
-5. Extract evidence from the CV (direct quotes or specific data points)
-6. Explain your reasoning clearly and objectively
+Your evaluation approach:
 
-Be objective, fair, and thorough. Consider both quantity and quality.
-Base your evaluation solely on the information provided in the CV."""
+1. CHAIN-OF-THOUGHT REASONING: Before making any judgments, work through 3-7 reasoning steps:
+   - Observe what information is present in the CV
+   - Analyze how it relates to the criterion
+   - Build your understanding step-by-step
+
+2. ATOMIC CRITERIA BREAKDOWN: Break down the main criterion into 2-6 specific sub-criteria:
+   - Each sub-criterion should measure one specific aspect
+   - Score each sub-criterion independently on a 1-5 scale:
+     * 1 = Poor/Minimal
+     * 2 = Below average
+     * 3 = Average/Acceptable
+     * 4 = Good/Strong
+     * 5 = Excellent/Outstanding
+   - Provide specific evidence from the CV for each sub-criterion
+
+3. FINAL EVALUATION: Based on your reasoning and sub-criteria analysis:
+   - Calculate an overall score (0-100)
+   - Assess your confidence (0.0-1.0)
+   - Identify key strengths and weaknesses
+   - Write a concise summary
+
+Be objective, fair, and thorough. Base your evaluation solely on information in the CV.
+Always cite specific evidence when making claims."""
 
 
 def build_evaluation_prompt(parsed_cv: dict, criterion: dict) -> str:
@@ -68,20 +78,36 @@ CERTIFICATIONS:
 
 ━━━━━━━━━━━━━━━━━━
 
-Provide your evaluation in the following JSON format (return ONLY the JSON, no other text):
+EVALUATION INSTRUCTIONS:
 
-{{
-    "score": <integer from 0-100>,
-    "confidence": <float from 0-1>,
-    "evidence": "<direct quotes or specific data points from the CV that support your score>",
-    "reasoning": "<your detailed explanation of why you assigned this score, referencing specific aspects of the CV>"
-}}
+Step 1: CHAIN-OF-THOUGHT REASONING
+Work through 3-7 reasoning steps, each containing:
+- step_number: The step number in your reasoning
+- observation: What you observed in the CV data
+- analysis: Your analysis of that observation
+
+Step 2: ATOMIC CRITERIA BREAKDOWN
+Break down the criterion "{criterion['name']}" into 2-6 specific, measurable sub-criteria.
+For each sub-criterion provide:
+- name: Name of the sub-criterion
+- description: What this sub-criterion measures
+- score: 1-5 rating (1=poor, 5=excellent)
+- evidence: Specific evidence from the CV
+- reasoning: Brief explanation of the score
+
+Step 3: FINAL EVALUATION
+Based on your Chain-of-Thought reasoning and sub-criteria analysis:
+- overall_score: 0-100 aggregate score
+- confidence: 0.0-1.0 confidence level
+- key_strengths: List 1-5 key strengths
+- key_weaknesses: List 1-5 key weaknesses
+- summary: 50-500 character evaluation summary
 
 Remember:
-- Be specific and cite actual information from the CV
-- Explain both strengths and weaknesses
-- Be fair and objective
-- Consider the criterion's weight in your evaluation
+- Think step-by-step before making judgments
+- Break down criteria into atomic, measurable aspects
+- Cite specific evidence from the CV
+- Be objective and fair
 """
 
     return prompt

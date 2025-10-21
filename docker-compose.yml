@@ -145,8 +145,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-      orchestrator-agent:
-        condition: service_healthy
+      parser-agent:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -187,7 +187,6 @@ services:
     environment:
       # Agent Config
       AGENT_ID: parser-001
-      QUEUE_NAME: parser
 
       # Infrastructure
       DATABASE_URL: postgresql://cavia:${POSTGRES_PASSWORD:-caviadev123}@postgres:5432/cavia
@@ -214,14 +213,13 @@ services:
     networks:
       - cavia-network
 
-  # Evaluator Agents - LLM-based evaluation (3 instances for parallel processing)
-  evaluator-agent-1:
+  # Evaluator Agent - LLM-based evaluation with internal loop for all criteria
+  evaluator-agent:
     image: cavia-evaluator:latest
-    container_name: cavia-evaluator-agent-1
+    container_name: cavia-evaluator-agent
     environment:
       # Agent Config
       AGENT_ID: evaluator-001
-      QUEUE_NAME: evaluator
 
       # Infrastructure
       DATABASE_URL: postgresql://cavia:${POSTGRES_PASSWORD:-caviadev123}@postgres:5432/cavia
@@ -245,95 +243,6 @@ services:
       - cavia-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
-  evaluator-agent-2:
-    image: cavia-evaluator:latest
-    container_name: cavia-evaluator-agent-2
-    environment:
-      # Agent Config
-      AGENT_ID: evaluator-002
-      QUEUE_NAME: evaluator
-
-      # Infrastructure
-      DATABASE_URL: postgresql://cavia:${POSTGRES_PASSWORD:-caviadev123}@postgres:5432/cavia
-      REDIS_URL: redis://redis:6379/0
-
-      # Ollama LLM
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3:8b}
-
-      # Logging
-      LOG_LEVEL: INFO
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      agent-registry:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - cavia-network
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-  evaluator-agent-3:
-    image: cavia-evaluator:latest
-    container_name: cavia-evaluator-agent-3
-    environment:
-      # Agent Config
-      AGENT_ID: evaluator-003
-      QUEUE_NAME: evaluator
-
-      # Infrastructure
-      DATABASE_URL: postgresql://cavia:${POSTGRES_PASSWORD:-caviadev123}@postgres:5432/cavia
-      REDIS_URL: redis://redis:6379/0
-
-      # Ollama LLM
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3:8b}
-
-      # Logging
-      LOG_LEVEL: INFO
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      agent-registry:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - cavia-network
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-  # Orchestrator Agent - Workflow coordinator
-  orchestrator-agent:
-    image: cavia-orchestrator:latest
-    container_name: cavia-orchestrator-agent
-    environment:
-      # Agent Config
-      AGENT_ID: orchestrator-001
-      QUEUE_NAME: orchestrator
-      QUEUE_ORCHESTRATION: orchestrator
-
-      # Infrastructure
-      DATABASE_URL: postgresql://cavia:${POSTGRES_PASSWORD:-caviadev123}@postgres:5432/cavia
-      REDIS_URL: redis://redis:6379/0
-
-      # Logging
-      LOG_LEVEL: INFO
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      agent-registry:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - cavia-network
 
   # Reporter Agent - Generates evaluation reports
   reporter-agent:
@@ -342,7 +251,6 @@ services:
     environment:
       # Agent Config
       AGENT_ID: reporter-001
-      QUEUE_NAME: reporter
 
       # Infrastructure
       DATABASE_URL: postgresql://cavia:${POSTGRES_PASSWORD:-caviadev123}@postgres:5432/cavia
@@ -374,6 +282,30 @@ services:
       - cavia-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  # ============================================================================
+  # NON-AGENTIC UNITS - Cross-boundary workers
+  # ============================================================================
+
+  # DB Writer Worker - Updates database with final results (non-agentic)
+  db-writer:
+    image: cavia-db-writer:latest
+    container_name: cavia-db-writer
+    environment:
+      # Infrastructure
+      DATABASE_URL: postgresql://cavia:${POSTGRES_PASSWORD:-caviadev123}@postgres:5432/cavia
+      REDIS_URL: redis://redis:6379/0
+
+      # Logging
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - cavia-network
 
 volumes:
   postgres-data:

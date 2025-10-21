@@ -17,6 +17,7 @@ setup(
         "rq>=1.15.1",
         "minio>=7.2.0",
         "sentence-transformers>=2.2.2",
+        "instructor>=1.0.0",  # Structured LLM outputs with Pydantic validation
         "httpx>=0.25.2",
         "tenacity>=8.2.3",
         "structlog>=24.1.0",

@@ -15,9 +15,13 @@ from .models import (
     CVEvaluationReport,
     AgentTask,
     AgentTaskResult,
+    # Structured evaluation models for Instructor
+    ReasoningStep,
+    SubCriterion,
+    StructuredEvaluation,
 )
 from .database import DatabaseManager, get_db_manager
-from .redis_client import RedisClient, get_redis_client
+from .redis_client import get_redis_connection
 from .minio_client import MinIOClient, get_minio_client
 from .ollama_client import OllamaClient, get_ollama_client
 from .base_agent import BaseAgent
@@ -39,10 +43,12 @@ __all__ = [
     "CVEvaluationReport",
     "AgentTask",
     "AgentTaskResult",
+    "ReasoningStep",
+    "SubCriterion",
+    "StructuredEvaluation",
     "DatabaseManager",
     "get_db_manager",
-    "RedisClient",
-    "get_redis_client",
+    "get_redis_connection",
     "MinIOClient",
     "get_minio_client",
     "OllamaClient",
