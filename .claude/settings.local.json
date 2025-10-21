@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose up -d)",
+      "Bash(docker compose ps)",
+      "Bash(docker compose up -d --build)",
+      "Bash(docker compose logs agent-registry)",
+      "Bash(docker run --rm cavia-agent-registry python -c \"import sys; sys.path.insert(0, ''/shared''); import main; print(''Import successful!'')\")",
+      "Bash(docker compose up -d --build agent-registry)",
+      "Bash(docker compose build --no-cache agent-registry)",
+      "Bash(docker compose up -d agent-registry)",
+      "Bash(docker compose ps agent-registry)",
+      "Bash(docker compose ps -a)",
+      "Bash(docker run --rm cavia-agent-registry env)",
+      "Bash(docker run --rm cavia-agent-registry uvicorn main:app --host 0.0.0.0 --port 8000)",
+      "Bash(docker compose logs --tail=20 agent-registry)",
+      "Bash(timeout 30 docker run --rm --network cavia_cavia-network -e DATABASE_URL=postgresql://cavia:caviadev123@cavia-postgres:5432/cavia -e REDIS_URL=redis://cavia-redis:6379/0 cavia-agent-registry uvicorn main:app --host 0.0.0.0 --port 8000)",
+      "Bash(docker compose down)",
+      "Bash(curl -s -X POST http://localhost:8001/agents/register -H \"Content-Type: application/json\" -d '{\n    \"\"\"\"agent_id\"\"\"\": \"\"\"\"test-001\"\"\"\",\n    \"\"\"\"agent_type\"\"\"\": \"\"\"\"test\"\"\"\",\n    \"\"\"\"name\"\"\"\": \"\"\"\"Test Agent\"\"\"\",\n    \"\"\"\"description\"\"\"\": \"\"\"\"A test agent for validation\"\"\"\",\n    \"\"\"\"capabilities\"\"\"\": {\"\"\"\"test\"\"\"\": true, \"\"\"\"version\"\"\"\": \"\"\"\"1.0.0\"\"\"\"},\n    \"\"\"\"queue_name\"\"\"\": \"\"\"\"test-queue\"\"\"\"\n  }')",
+      "Bash(curl -s http://localhost:8001/agents)",
+      "Bash(python3 -m json.tool)",
+      "Bash(docker compose build --no-cache backend-api)",
+      "Bash(docker compose restart backend-api)",
+      "Bash(docker exec cavia-redis redis-cli FLUSHALL)",
+      "Bash(docker compose restart orchestrator-agent)",
+      "Bash(curl -s -X POST http://localhost:8000/api/v1/cvs/upload -F \"file=@/tmp/test.pdf\")",
+      "Bash(docker compose logs --tail=60 orchestrator-agent)",
+      "Bash(docker exec cavia-orchestrator-agent pip list)",
+      "Bash(docker build -t cavia-orchestrator:latest -f agents/orchestrator/Dockerfile .)",
+      "Bash(/dev/null)",
+      "Bash(docker build -t cavia-backend-api:latest -f backend/Dockerfile.api .)",
+      "Bash(docker compose restart orchestrator-agent backend-api)",
+      "Bash(docker exec cavia-backend-api pip list)",
+      "Bash(curl:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker stop:*)",
+      "Bash(docker rm:*)",
+      "Bash(docker rmi:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

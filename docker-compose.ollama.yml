@@ -1,0 +1,55 @@
+# Optional Ollama service for local LLM inference
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.ollama.yml up -d
+
+version: '3.8'
+
+services:
+  # Ollama for local LLM inference
+  ollama:
+    image: ollama/ollama:latest
+    container_name: cavia-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    # Uncomment for GPU support (NVIDIA)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    networks:
+      - cavia-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Ollama model puller (pulls default model on startup)
+  ollama-init:
+    image: curlimages/curl:latest
+    container_name: cavia-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Pulling model: ${OLLAMA_MODEL:-llama3:8b}...';
+      curl -X POST http://ollama:11434/api/pull -d '{\"name\": \"${OLLAMA_MODEL:-llama3:8b}\"}';
+      echo 'Model pulled successfully';
+      "
+    networks:
+      - cavia-network
+
+volumes:
+  ollama-models:
+    driver: local
+
+networks:
+  cavia-network:
+    external: true

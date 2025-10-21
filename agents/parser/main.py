@@ -1,0 +1,338 @@
+"""
+Parser Agent - Extracts structured data from CV files (PDF/DOCX)
+"""
+
+import sys
+import os
+import time
+import tempfile
+from typing import Any, Dict
+from pathlib import Path
+
+# Add shared package to path
+sys.path.insert(0, "/shared")
+
+from cavia_common import (
+    BaseAgent,
+    AgentTask,
+    AgentTaskResult,
+    ParsedCV,
+    get_logger,
+    setup_logging,
+    get_minio_client,
+    get_db_manager,
+)
+
+from parsers import PDFParser, DOCXParser, CVExtractor
+
+# Setup logging
+setup_logging()
+logger = get_logger(__name__)
+
+
+class ParserAgent(BaseAgent):
+    """
+    Agentic Unit for parsing CV files.
+
+    Responsibilities:
+    - Download CV from MinIO
+    - Detect file format (PDF/DOCX)
+    - Extract text content
+    - Extract structured data (contact, education, experience, skills, etc.)
+    - Store ParsedCV in database and MinIO
+    """
+
+    def __init__(self, agent_id: str = None):
+        super().__init__(agent_id)
+
+        # Initialize parsers
+        self.pdf_parser = PDFParser()
+        self.docx_parser = DOCXParser()
+        self.extractor = CVExtractor()
+
+        # Initialize clients
+        self.minio = get_minio_client()
+        self.db = get_db_manager()
+
+        self.logger.info("ParserAgent initialized", agent_id=self.agent_id)
+
+    def get_agent_type(self) -> str:
+        """Return the agent type"""
+        return "parser"
+
+    def get_agent_info(self) -> Dict[str, Any]:
+        """Return agent metadata for registration"""
+        return {
+            "name": "CV Parser Agent",
+            "description": "Extracts structured data from CV files in PDF and DOCX formats",
+            "capabilities": {
+                "supported_formats": ["pdf", "docx"],
+                "extraction_features": [
+                    "contact_information",
+                    "education",
+                    "work_experience",
+                    "skills",
+                    "certifications"
+                ],
+                "version": "1.0.0",
+            },
+        }
+
+    def process_task(self, task: AgentTask) -> AgentTaskResult:
+        """
+        Process a CV parsing task.
+
+        Expected task payload:
+        {
+            "task_type": "parse_cv",
+            "payload": {
+                "job_id": "uuid",
+                "filename": "cv.pdf",
+                "minio_bucket": "cvs-raw",
+                "minio_path": "path/to/cv.pdf"
+            }
+        }
+        """
+        start_time = time.time()
+
+        try:
+            self.logger.info(
+                "Starting CV parsing",
+                task_id=task.task_id,
+                job_id=task.payload.get("job_id"),
+                filename=task.payload.get("filename"),
+            )
+
+            # Extract task parameters
+            job_id = task.payload["job_id"]
+            filename = task.payload["filename"]
+            bucket = task.payload.get("minio_bucket", "cvs-raw")
+            minio_path = task.payload["minio_path"]
+
+            # Download file from MinIO
+            temp_file = self._download_file(bucket, minio_path, filename)
+
+            try:
+                # Detect file type and parse
+                file_ext = Path(filename).suffix.lower()
+
+                if file_ext == '.pdf':
+                    raw_text = self.pdf_parser.parse(temp_file)
+                    metadata = self.pdf_parser.get_metadata(temp_file)
+                elif file_ext in ['.docx', '.doc']:
+                    raw_text = self.docx_parser.parse(temp_file)
+                    metadata = self.docx_parser.get_metadata(temp_file)
+                else:
+                    raise ValueError(f"Unsupported file format: {file_ext}")
+
+                if not raw_text:
+                    raise ValueError("Failed to extract text from file")
+
+                # Extract structured data
+                parsed_cv = self._extract_structured_data(raw_text, filename, metadata)
+
+                # Store ParsedCV in database
+                self._store_parsed_cv(job_id, parsed_cv)
+
+                # Store in MinIO
+                storage_path = self._store_in_minio(job_id, parsed_cv)
+
+                execution_time = time.time() - start_time
+
+                self.logger.info(
+                    "CV parsing completed successfully",
+                    task_id=task.task_id,
+                    job_id=job_id,
+                    execution_time=execution_time,
+                )
+
+                return AgentTaskResult(
+                    task_id=task.task_id,
+                    agent_id=self.agent_id,
+                    status="success",
+                    result={
+                        "job_id": job_id,
+                        "parsed_cv": parsed_cv.dict(),
+                        "storage_path": storage_path,
+                    },
+                    execution_time=execution_time,
+                )
+
+            finally:
+                # Cleanup temp file
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+
+        except Exception as e:
+            execution_time = time.time() - start_time
+
+            self.logger.error(
+                "CV parsing failed",
+                task_id=task.task_id,
+                job_id=task.payload.get("job_id"),
+                error=str(e),
+                execution_time=execution_time,
+            )
+
+            return AgentTaskResult(
+                task_id=task.task_id,
+                agent_id=self.agent_id,
+                status="error",
+                error=str(e),
+                execution_time=execution_time,
+            )
+
+    def _download_file(self, bucket: str, object_name: str, filename: str) -> str:
+        """Download file from MinIO to temp file"""
+        self.logger.debug(f"Downloading file from MinIO: {bucket}/{object_name}")
+
+        # Download file data
+        file_data = self.minio.download_file(bucket, object_name)
+        if not file_data:
+            raise ValueError(f"Failed to download file from MinIO: {bucket}/{object_name}")
+
+        # Save to temp file
+        suffix = Path(filename).suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(file_data)
+            temp_path = tmp.name
+
+        self.logger.debug(f"File downloaded to temp: {temp_path}")
+        return temp_path
+
+    def _extract_structured_data(
+        self, raw_text: str, filename: str, file_metadata: dict
+    ) -> ParsedCV:
+        """Extract structured data from raw text"""
+        self.logger.debug("Extracting structured data")
+
+        # Extract sections
+        sections = self.extractor.extract_sections(raw_text)
+
+        # Extract contact information
+        contact_info = self.extractor.extract_contact_info(raw_text)
+
+        # Extract education
+        education_text = sections.get('education', '')
+        education = self.extractor.extract_education(education_text) if education_text else []
+
+        # Extract experience
+        experience_text = sections.get('experience', '')
+        experience = self.extractor.extract_experience(experience_text) if experience_text else []
+
+        # Extract skills
+        skills_text = sections.get('skills', raw_text)  # Fallback to full text
+        skills = self.extractor.extract_skills(skills_text)
+
+        # Extract certifications
+        cert_text = sections.get('certifications', '')
+        certifications = self.extractor.extract_certifications(cert_text) if cert_text else []
+
+        # Build ParsedCV object
+        parsed_cv = ParsedCV(
+            contact_info=contact_info,
+            education=education,
+            experience=experience,
+            skills=skills,
+            certifications=certifications,
+            raw_text=raw_text[:10000],  # Truncate for storage (keep first 10k chars)
+            metadata={
+                "filename": filename,
+                "file_metadata": file_metadata,
+                "parser_version": "1.0.0",
+                "sections_found": list(sections.keys()),
+            }
+        )
+
+        self.logger.debug(
+            "Structured data extracted",
+            contact_count=len(contact_info),
+            education_count=len(education),
+            experience_count=len(experience),
+            skills_count=len(skills),
+            certifications_count=len(certifications),
+        )
+
+        return parsed_cv
+
+    def _store_parsed_cv(self, job_id: str, parsed_cv: ParsedCV):
+        """Store ParsedCV in database"""
+        try:
+            with self.db.get_session() as session:
+                # Update cv_jobs table with parsed data
+                from sqlalchemy import text
+
+                query = text("""
+                    UPDATE cv_jobs
+                    SET metadata = jsonb_set(
+                        COALESCE(metadata, '{}'),
+                        '{parsed_cv}',
+                        :parsed_cv::jsonb
+                    )
+                    WHERE job_id = :job_id
+                """)
+
+                session.execute(
+                    query,
+                    {
+                        "job_id": job_id,
+                        "parsed_cv": parsed_cv.model_dump_json(),
+                    }
+                )
+                session.commit()
+
+            self.logger.debug("ParsedCV stored in database", job_id=job_id)
+
+        except Exception as e:
+            self.logger.error("Failed to store ParsedCV in database", error=str(e))
+            raise
+
+    def _store_in_minio(self, job_id: str, parsed_cv: ParsedCV) -> str:
+        """Store ParsedCV JSON in MinIO"""
+        import json
+        from io import BytesIO
+
+        try:
+            storage_path = f"cvs-processed/parsed/{job_id}/parsed_cv.json"
+
+            # Convert to JSON
+            json_data = parsed_cv.model_dump_json(indent=2)
+
+            # Upload to MinIO
+            self.minio.upload_file(
+                bucket_name="cvs-processed",
+                object_name=storage_path,
+                file_data=BytesIO(json_data.encode('utf-8')),
+                content_type="application/json",
+            )
+
+            self.logger.debug("ParsedCV stored in MinIO", storage_path=storage_path)
+            return storage_path
+
+        except Exception as e:
+            self.logger.error("Failed to store ParsedCV in MinIO", error=str(e))
+            raise
+
+
+def main():
+    """Main entry point for the Parser Agent"""
+    import os
+
+    # Get agent ID from environment
+    agent_id = os.getenv("AGENT_ID", "parser-001")
+
+    # Create and start agent
+    agent = ParserAgent(agent_id=agent_id)
+
+    logger.info(
+        "Starting Parser Agent worker",
+        agent_id=agent.agent_id,
+        agent_type=agent.get_agent_type(),
+    )
+
+    # Start the RQ worker (blocking call)
+    agent.start_worker()
+
+
+if __name__ == "__main__":
+    main()
