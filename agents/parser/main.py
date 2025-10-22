@@ -320,8 +320,12 @@ class ParserAgent(BaseAgent):
         """Discover and enqueue to evaluator agent using semantic discovery"""
         try:
             import json
+            import sys
+
+            print(f"DEBUG: _enqueue_to_evaluator called for job {job_id}", file=sys.stderr, flush=True)
 
             # Use semantic discovery to find evaluator agent
+            print(f"DEBUG: About to call enqueue_to_next_agent", file=sys.stderr, flush=True)
             job_id_result = self.enqueue_to_next_agent(
                 capability_query="evaluate CV against job criteria and acceptance standards",
                 task_type="evaluate_cv",
@@ -334,12 +338,15 @@ class ParserAgent(BaseAgent):
                 steps_completed=task.steps_completed
             )
 
+            print(f"DEBUG: enqueue_to_next_agent returned: {job_id_result}", file=sys.stderr, flush=True)
+
             if job_id_result:
                 self.logger.info("Enqueued to evaluator via semantic discovery", job_id=job_id, rq_job_id=job_id_result)
             else:
                 self.logger.warning("Failed to enqueue to evaluator", job_id=job_id)
 
         except Exception as e:
+            print(f"DEBUG: Exception in _enqueue_to_evaluator: {e}", file=sys.stderr, flush=True)
             self.logger.error("Failed to enqueue to evaluator", job_id=job_id, error=str(e))
             # Don't raise - parsing was successful even if enqueueing failed
 

@@ -41,7 +41,8 @@
       "Bash(xargs:*)",
       "Bash(docker build:*)",
       "Bash(docker logs:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(nvidia-smi:*)"
     ],
     "deny": [],
     "ask": []

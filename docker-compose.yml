@@ -88,6 +88,8 @@ services:
       REDIS_URL: redis://redis:6379/0
     ports:
       - "8001:8000"
+    volumes:
+      - chromadb-data:/data/chromadb
     depends_on:
       postgres:
         condition: service_healthy
@@ -101,6 +103,30 @@ services:
       retries: 3
     networks:
       - cavia-network
+
+  # Ollama LLM Service
+  ollama:
+    image: ollama/ollama:latest
+    container_name: cavia-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - cavia-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
 
   # RQ Dashboard (optional, for monitoring queues)
   rq-dashboard:
@@ -198,6 +224,9 @@ services:
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
       MINIO_SECURE: "false"
 
+      # Fix tokenizer fork issue
+      TOKENIZERS_PARALLELISM: "false"
+
       # Logging
       LOG_LEVEL: INFO
     depends_on:
@@ -226,8 +255,8 @@ services:
       REDIS_URL: redis://redis:6379/0
 
       # Ollama LLM
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3:8b}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2}
 
       # Logging
       LOG_LEVEL: INFO
@@ -238,11 +267,11 @@ services:
         condition: service_healthy
       agent-registry:
         condition: service_healthy
+      ollama:
+        condition: service_started
     restart: unless-stopped
     networks:
       - cavia-network
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
   # Reporter Agent - Generates evaluation reports
   reporter-agent:
@@ -263,8 +292,8 @@ services:
       MINIO_SECURE: "false"
 
       # Ollama LLM
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3:8b}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2}
 
       # Logging
       LOG_LEVEL: INFO
@@ -277,11 +306,11 @@ services:
         condition: service_healthy
       agent-registry:
         condition: service_healthy
+      ollama:
+        condition: service_started
     restart: unless-stopped
     networks:
       - cavia-network
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
   # ============================================================================
   # NON-AGENTIC UNITS - Cross-boundary workers
@@ -313,6 +342,10 @@ volumes:
   redis-data:
     driver: local
   minio-data:
+    driver: local
+  chromadb-data:
+    driver: local
+  ollama-data:
     driver: local
 
 networks:

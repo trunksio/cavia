@@ -16,7 +16,7 @@ setup(
         "redis>=4.5.0,<5.0.0",  # Pin to 4.x for RQ 2.6.0 compatibility
         "rq>=1.15.1",
         "minio>=7.2.0",
-        "sentence-transformers>=2.2.2",
+        "requests>=2.31.0",  # HTTP calls to agent-registry service
         "instructor>=1.0.0",  # Structured LLM outputs with Pydantic validation
         "httpx>=0.25.2",
         "tenacity>=8.2.3",

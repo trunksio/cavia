@@ -11,8 +11,6 @@ from threading import Thread
 import signal
 import sys
 
-from sentence_transformers import SentenceTransformer
-
 from rq import Queue, Worker
 
 from .config import get_settings
@@ -49,22 +47,7 @@ class BaseAgent(ABC):
         self.heartbeat_thread: Optional[Thread] = None
         self.running = False
 
-        # Embedding model for semantic descriptions (lazy-loaded)
-        self._embedding_model: Optional[SentenceTransformer] = None
-
         self.logger.info("Agent initialized", agent_id=self.agent_id)
-
-    def _get_embedding_model(self) -> SentenceTransformer:
-        """
-        Lazy-load the sentence transformers embedding model.
-
-        Only loads the model when actually needed (registration or discovery),
-        preventing issues in RQ worker forked processes that don't use it.
-        """
-        if self._embedding_model is None:
-            self.logger.info("Loading sentence transformers model", model=self.settings.embedding_model)
-            self._embedding_model = SentenceTransformer(self.settings.embedding_model)
-        return self._embedding_model
 
     @abstractmethod
     def get_agent_type(self) -> str:
@@ -95,39 +78,34 @@ class BaseAgent(ABC):
         pass
 
     def register(self) -> bool:
-        """Register this agent in the semantic registry"""
+        """Register this agent via HTTP call to agent-registry service (ChromaDB)"""
         try:
+            import requests
+
             info = self.get_agent_info()
 
-            # Generate semantic embedding (lazy-loads model on first use)
-            description = f"{info['name']}: {info['description']}"
-            embedding = self._get_embedding_model().encode(description)
-
-            # Create registration
-            registration = AgentRegistration(
-                agent_id=self.agent_id,
-                agent_type=self.get_agent_type(),
-                name=info["name"],
-                description=info["description"],
-                capabilities=info["capabilities"],
-                queue_name=self.get_queue_name(),
-                status=AgentStatus.ACTIVE,
+            # Call registry HTTP API - ChromaDB handles embeddings!
+            # No need to load PyTorch models in agentic units
+            registry_url = getattr(self.settings, 'registry_url', "http://agent-registry:8000")
+            response = requests.post(
+                f"{registry_url}/agents/register",
+                json={
+                    "agent_id": self.agent_id,
+                    "agent_type": self.get_agent_type(),
+                    "name": info["name"],
+                    "description": info["description"],
+                    "capabilities": info["capabilities"],
+                    "queue_name": self.get_queue_name(),
+                },
+                timeout=30,
             )
 
-            # Register in database
-            success = self.db.register_agent(
-                agent_id=self.agent_id,
-                agent_type=registration.agent_type,
-                name=registration.name,
-                description=registration.description,
-                capabilities=registration.capabilities,
-                queue_name=registration.queue_name,
-                semantic_embedding=embedding,
-            )
+            response.raise_for_status()
+            success = response.json().get("status") == "success"
 
             if success:
                 self.status = AgentStatus.ACTIVE
-                self.logger.info("Agent registered successfully", agent_id=self.agent_id)
+                self.logger.info("Agent registered successfully via ChromaDB", agent_id=self.agent_id)
             else:
                 self.logger.error("Agent registration failed", agent_id=self.agent_id)
 
@@ -227,7 +205,9 @@ class BaseAgent(ABC):
 
     def discover_next_agent(self, capability_query: str) -> Optional[Dict[str, str]]:
         """
-        Discover the next agent to handle a capability using semantic search.
+        Discover the next agent via HTTP call to agent-registry service (ChromaDB).
+
+        No local embeddings needed - registry handles everything!
 
         Args:
             capability_query: Natural language description of needed capability
@@ -237,22 +217,30 @@ class BaseAgent(ABC):
             Dict with 'agent_type' and 'queue_name', or None if not found
         """
         try:
-            # Generate embedding for the capability query (lazy-loads model on first use)
-            query_embedding = self._get_embedding_model().encode(capability_query)
+            import requests
 
-            # Search semantic registry for best match
-            agent_info = self.db.search_agents_by_capability(
-                query_embedding=query_embedding,
-                limit=1
+            # Call registry's /discover endpoint - ChromaDB handles embeddings!
+            registry_url = getattr(self.settings, 'registry_url', "http://agent-registry:8000")
+            response = requests.post(
+                f"{registry_url}/agents/discover",
+                json={
+                    "capability_query": capability_query,
+                    "limit": 1,
+                },
+                timeout=10,
             )
 
-            if agent_info:
-                best_match = agent_info[0]
+            response.raise_for_status()
+            agents = response.json()
+
+            if agents and len(agents) > 0:
+                best_match = agents[0]
                 self.logger.info(
-                    "Discovered next agent",
+                    "Discovered next agent via ChromaDB",
                     capability=capability_query,
                     agent_type=best_match['agent_type'],
-                    queue=best_match['queue_name']
+                    queue=best_match['queue_name'],
+                    similarity=best_match['similarity_score'],
                 )
                 return {
                     "agent_type": best_match['agent_type'],
@@ -290,9 +278,14 @@ class BaseAgent(ABC):
         try:
             import uuid
             from rq import Queue
+            import sys
+
+            print(f"DEBUG enqueue: Starting discovery for: {capability_query}", file=sys.stderr, flush=True)
 
             # Discover next agent
+            print(f"DEBUG enqueue: About to call discover_next_agent", file=sys.stderr, flush=True)
             next_agent = self.discover_next_agent(capability_query)
+            print(f"DEBUG enqueue: Discovery returned: {next_agent}", file=sys.stderr, flush=True)
             if not next_agent:
                 raise Exception(f"No agent found for capability: {capability_query}")
 

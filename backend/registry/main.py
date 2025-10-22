@@ -1,5 +1,6 @@
 """
 Agent Registry Service - Central discovery and registration for Agentic Units
+Uses ChromaDB for vector storage and semantic search
 """
 
 import sys
@@ -11,15 +12,13 @@ sys.path.insert(0, "/shared")
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
+import chromadb
+from chromadb.config import Settings as ChromaSettings
 
 from cavia_common import (
     get_settings,
     setup_logging,
     get_logger,
-    get_db_manager,
-    AgentRegistration,
-    AgentStatus,
 )
 
 # Setup
@@ -38,9 +37,18 @@ class AgentRegisterRequest(BaseModel):
     queue_name: str
 
 
-class AgentSearchRequest(BaseModel):
-    query: str
-    limit: int = 10
+class AgentDiscoverRequest(BaseModel):
+    capability_query: str
+    limit: int = 1
+
+
+class AgentDiscoverResponse(BaseModel):
+    agent_id: str
+    agent_type: str
+    name: str
+    description: str
+    queue_name: str
+    similarity_score: float
 
 
 class AgentInfo(BaseModel):
@@ -53,25 +61,35 @@ class AgentInfo(BaseModel):
     status: str
 
 
-# Global embedding model
-embedding_model: Optional[SentenceTransformer] = None
+# Global ChromaDB client and collection
+chroma_client: Optional[chromadb.Client] = None
+agent_collection: Optional[chromadb.Collection] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
-    global embedding_model
+    global chroma_client, agent_collection
 
     # Startup
-    logger.info("Starting Agent Registry Service")
+    logger.info("Starting Agent Registry Service with ChromaDB")
 
-    # Load embedding model
-    logger.info("Loading embedding model", model=settings.embedding_model)
-    embedding_model = SentenceTransformer(settings.embedding_model)
+    # Initialize ChromaDB with persistent storage
+    chroma_client = chromadb.PersistentClient(
+        path="/data/chromadb",
+        settings=ChromaSettings(
+            anonymized_telemetry=False,
+            allow_reset=True,
+        )
+    )
 
-    # Initialize database
-    db = get_db_manager()
-    logger.info("Database connection established")
+    # Get or create collection for agents
+    agent_collection = chroma_client.get_or_create_collection(
+        name="cavia_agents",
+        metadata={"description": "CAVIA Agentic Units Registry"}
+    )
+
+    logger.info("ChromaDB initialized", collection="cavia_agents")
 
     yield
 
@@ -82,8 +100,8 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(
     title="CAVIA Agent Registry",
-    description="Central registry and discovery service for Agentic Units",
-    version="0.1.0",
+    description="Central registry and discovery service for Agentic Units (ChromaDB)",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -103,35 +121,43 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "agent-registry",
-        "version": "0.1.0",
+        "version": "0.2.0",
+        "backend": "chromadb",
     }
 
 
 @app.post("/agents/register", status_code=201)
 async def register_agent(request: AgentRegisterRequest):
-    """Register a new agent or update existing registration"""
+    """
+    Register a new agent or update existing registration.
+
+    ChromaDB automatically handles embedding generation for the description.
+    """
     try:
-        db = get_db_manager()
+        # Build full description for embedding
+        full_description = f"{request.name}: {request.description}"
 
-        # Generate semantic embedding
-        description = f"{request.name}: {request.description}"
-        embedding = embedding_model.encode(description)
+        # Prepare metadata
+        metadata = {
+            "agent_id": request.agent_id,
+            "agent_type": request.agent_type,
+            "name": request.name,
+            "description": request.description,
+            "queue_name": request.queue_name,
+            "status": "active",
+            # Store capabilities as JSON string (ChromaDB metadata must be primitives)
+            "capabilities": str(request.capabilities),
+        }
 
-        # Register in database
-        success = db.register_agent(
-            agent_id=request.agent_id,
-            agent_type=request.agent_type,
-            name=request.name,
-            description=request.description,
-            capabilities=request.capabilities,
-            queue_name=request.queue_name,
-            semantic_embedding=embedding,
+        # Add or update in ChromaDB
+        # ChromaDB uses upsert semantics - will update if ID exists
+        agent_collection.upsert(
+            ids=[request.agent_id],
+            documents=[full_description],
+            metadatas=[metadata],
         )
 
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to register agent")
-
-        logger.info("Agent registered", agent_id=request.agent_id)
+        logger.info("Agent registered in ChromaDB", agent_id=request.agent_id)
 
         return {
             "status": "success",
@@ -144,15 +170,80 @@ async def register_agent(request: AgentRegisterRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/agents/discover", response_model=List[AgentDiscoverResponse])
+async def discover_agents(request: AgentDiscoverRequest):
+    """
+    Discover agents by semantic similarity to capability query.
+
+    This is the key endpoint that agents call to find the next agent in the chain.
+    ChromaDB automatically generates embeddings and performs vector search.
+    """
+    try:
+        # Query ChromaDB with natural language capability description
+        # ChromaDB handles embedding generation internally
+        results = agent_collection.query(
+            query_texts=[request.capability_query],
+            n_results=request.limit,
+            where={"status": "active"},  # Only active agents
+        )
+
+        # Extract results
+        discovered_agents = []
+        if results['ids'] and results['ids'][0]:
+            for i, agent_id in enumerate(results['ids'][0]):
+                metadata = results['metadatas'][0][i]
+                # ChromaDB returns distances, convert to similarity (1 - distance)
+                distance = results['distances'][0][i] if results['distances'] else 0
+                similarity = 1.0 - distance
+
+                discovered_agents.append(
+                    AgentDiscoverResponse(
+                        agent_id=metadata['agent_id'],
+                        agent_type=metadata['agent_type'],
+                        name=metadata['name'],
+                        description=metadata['description'],
+                        queue_name=metadata['queue_name'],
+                        similarity_score=similarity,
+                    )
+                )
+
+        logger.info(
+            "Agent discovery completed",
+            query=request.capability_query,
+            results_count=len(discovered_agents),
+        )
+
+        return discovered_agents
+
+    except Exception as e:
+        logger.error("Discovery error", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/agents/heartbeat")
 async def agent_heartbeat(agent_id: str):
-    """Update agent heartbeat"""
-    try:
-        db = get_db_manager()
-        success = db.update_heartbeat(agent_id)
+    """
+    Update agent heartbeat.
 
-        if not success:
+    Note: ChromaDB doesn't have built-in heartbeat tracking.
+    We update the metadata timestamp.
+    """
+    try:
+        # Get current agent
+        result = agent_collection.get(ids=[agent_id])
+
+        if not result['ids']:
             raise HTTPException(status_code=404, detail="Agent not found")
+
+        # Update metadata with new timestamp
+        import time
+        metadata = result['metadatas'][0]
+        metadata['last_heartbeat'] = str(time.time())
+
+        agent_collection.update(
+            ids=[agent_id],
+            metadatas=[metadata],
+        )
 
         return {"status": "success", "agent_id": agent_id}
 
@@ -171,36 +262,42 @@ async def list_agents(
 ):
     """List all registered agents with optional filters"""
     try:
-        db = get_db_manager()
+        # Build where filter
+        where_filter = {}
+        if agent_type:
+            where_filter["agent_type"] = agent_type
+        if status:
+            where_filter["status"] = status
+        else:
+            where_filter["status"] = "active"
 
-        with db.get_session() as session:
-            from cavia_common.database import AgentRegistryModel
+        # Get from ChromaDB
+        results = agent_collection.get(
+            where=where_filter if where_filter else None,
+            limit=limit,
+        )
 
-            query = session.query(AgentRegistryModel)
+        agents = []
+        if results['ids']:
+            for i, agent_id in enumerate(results['ids']):
+                metadata = results['metadatas'][i]
+                # Parse capabilities back from string
+                import ast
+                capabilities = ast.literal_eval(metadata.get('capabilities', '{}'))
 
-            if agent_type:
-                query = query.filter_by(agent_type=agent_type)
-
-            if status:
-                query = query.filter_by(status=status)
-            else:
-                # Default to active agents only
-                query = query.filter_by(status="active")
-
-            agents = query.limit(limit).all()
-
-            return [
-                AgentInfo(
-                    agent_id=agent.agent_id,
-                    agent_type=agent.agent_type,
-                    name=agent.name,
-                    description=agent.description,
-                    capabilities=agent.capabilities or {},
-                    queue_name=agent.queue_name,
-                    status=agent.status,
+                agents.append(
+                    AgentInfo(
+                        agent_id=metadata['agent_id'],
+                        agent_type=metadata['agent_type'],
+                        name=metadata['name'],
+                        description=metadata['description'],
+                        capabilities=capabilities,
+                        queue_name=metadata['queue_name'],
+                        status=metadata.get('status', 'active'),
+                    )
                 )
-                for agent in agents
-            ]
+
+        return agents
 
     except Exception as e:
         logger.error("List agents error", error=str(e))
@@ -211,29 +308,26 @@ async def list_agents(
 async def get_agent(agent_id: str):
     """Get specific agent details"""
     try:
-        db = get_db_manager()
+        result = agent_collection.get(ids=[agent_id])
 
-        with db.get_session() as session:
-            from cavia_common.database import AgentRegistryModel
+        if not result['ids']:
+            raise HTTPException(status_code=404, detail="Agent not found")
 
-            agent = (
-                session.query(AgentRegistryModel)
-                .filter_by(agent_id=agent_id)
-                .first()
-            )
+        metadata = result['metadatas'][0]
 
-            if not agent:
-                raise HTTPException(status_code=404, detail="Agent not found")
+        # Parse capabilities back from string
+        import ast
+        capabilities = ast.literal_eval(metadata.get('capabilities', '{}'))
 
-            return AgentInfo(
-                agent_id=agent.agent_id,
-                agent_type=agent.agent_type,
-                name=agent.name,
-                description=agent.description,
-                capabilities=agent.capabilities or {},
-                queue_name=agent.queue_name,
-                status=agent.status,
-            )
+        return AgentInfo(
+            agent_id=metadata['agent_id'],
+            agent_type=metadata['agent_type'],
+            name=metadata['name'],
+            description=metadata['description'],
+            capabilities=capabilities,
+            queue_name=metadata['queue_name'],
+            status=metadata.get('status', 'active'),
+        )
 
     except HTTPException:
         raise
@@ -242,58 +336,27 @@ async def get_agent(agent_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/agents/search", response_model=List[AgentInfo])
-async def search_agents(request: AgentSearchRequest):
-    """Semantic search for agents by capability description"""
-    try:
-        db = get_db_manager()
-
-        # For now, simple text-based search
-        # TODO: Implement proper vector similarity search with pgvector
-        agents = db.find_agents_by_capability(request.query, limit=request.limit)
-
-        return [
-            AgentInfo(
-                agent_id=a["agent_id"],
-                agent_type=a["agent_type"],
-                name=a["name"],
-                description=a["description"],
-                capabilities=a["capabilities"] or {},
-                queue_name=a["queue_name"],
-                status="active",
-            )
-            for a in agents
-        ]
-
-    except Exception as e:
-        logger.error("Search error", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.delete("/agents/{agent_id}")
 async def deregister_agent(agent_id: str):
     """Deregister an agent (mark as inactive)"""
     try:
-        db = get_db_manager()
+        result = agent_collection.get(ids=[agent_id])
 
-        with db.get_session() as session:
-            from cavia_common.database import AgentRegistryModel
+        if not result['ids']:
+            raise HTTPException(status_code=404, detail="Agent not found")
 
-            agent = (
-                session.query(AgentRegistryModel)
-                .filter_by(agent_id=agent_id)
-                .first()
-            )
+        # Update status to inactive
+        metadata = result['metadatas'][0]
+        metadata['status'] = 'inactive'
 
-            if not agent:
-                raise HTTPException(status_code=404, detail="Agent not found")
+        agent_collection.update(
+            ids=[agent_id],
+            metadatas=[metadata],
+        )
 
-            agent.status = "inactive"
-            session.commit()
+        logger.info("Agent deregistered", agent_id=agent_id)
 
-            logger.info("Agent deregistered", agent_id=agent_id)
-
-            return {"status": "success", "message": "Agent deregistered"}
+        return {"status": "success", "message": "Agent deregistered"}
 
     except HTTPException:
         raise
