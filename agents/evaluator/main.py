@@ -337,7 +337,7 @@ class EvaluatorAgent(BaseAgent):
                         :confidence,
                         :evidence,
                         :reasoning,
-                        :metadata::jsonb
+                        CAST(:metadata AS jsonb)
                     )
                 """)
 

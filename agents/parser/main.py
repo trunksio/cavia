@@ -23,7 +23,7 @@ from cavia_common import (
     get_db_manager,
 )
 
-from parsers import PDFParser, DOCXParser, CVExtractor
+from parsers import PDFParser, DOCXParser, LLMCVExtractor
 
 # Setup logging
 setup_logging()
@@ -38,7 +38,7 @@ class ParserAgent(BaseAgent):
     - Download CV from MinIO
     - Detect file format (PDF/DOCX)
     - Extract text content
-    - Extract structured data (contact, education, experience, skills, etc.)
+    - Extract structured data using LLM (contact, education, experience, skills, etc.)
     - Store ParsedCV in database and MinIO
     """
 
@@ -48,13 +48,17 @@ class ParserAgent(BaseAgent):
         # Initialize parsers
         self.pdf_parser = PDFParser()
         self.docx_parser = DOCXParser()
-        self.extractor = CVExtractor()
+
+        # Initialize LLM-based extractor (much more reliable than regex)
+        from cavia_common import get_ollama_client
+        ollama_client = get_ollama_client()
+        self.extractor = LLMCVExtractor(ollama_client)
 
         # Initialize clients
         self.minio = get_minio_client()
         self.db = get_db_manager()
 
-        self.logger.info("ParserAgent initialized", agent_id=self.agent_id)
+        self.logger.info("ParserAgent initialized with LLM extractor", agent_id=self.agent_id)
 
     def get_agent_type(self) -> str:
         """Return the agent type"""
@@ -206,54 +210,35 @@ class ParserAgent(BaseAgent):
     def _extract_structured_data(
         self, raw_text: str, filename: str, file_metadata: dict
     ) -> ParsedCV:
-        """Extract structured data from raw text"""
-        self.logger.debug("Extracting structured data")
+        """Extract structured data from raw text using LLM"""
+        self.logger.debug("Extracting structured data using LLM")
 
-        # Extract sections
-        sections = self.extractor.extract_sections(raw_text)
+        # Use LLM to extract all sections in one call (more efficient and accurate)
+        extracted_data = self.extractor.extract_all_sections(raw_text)
 
-        # Extract contact information
-        contact_info = self.extractor.extract_contact_info(raw_text)
-
-        # Extract education
-        education_text = sections.get('education', '')
-        education = self.extractor.extract_education(education_text) if education_text else []
-
-        # Extract experience
-        experience_text = sections.get('experience', '')
-        experience = self.extractor.extract_experience(experience_text) if experience_text else []
-
-        # Extract skills
-        skills_text = sections.get('skills', raw_text)  # Fallback to full text
-        skills = self.extractor.extract_skills(skills_text)
-
-        # Extract certifications
-        cert_text = sections.get('certifications', '')
-        certifications = self.extractor.extract_certifications(cert_text) if cert_text else []
-
-        # Build ParsedCV object
+        # Build ParsedCV object from LLM-extracted data
         parsed_cv = ParsedCV(
-            contact_info=contact_info,
-            education=education,
-            experience=experience,
-            skills=skills,
-            certifications=certifications,
+            contact_info=extracted_data.get("contact_info", {}),
+            education=extracted_data.get("education", []),
+            experience=extracted_data.get("experience", []),
+            skills=extracted_data.get("skills", []),
+            certifications=extracted_data.get("certifications", []),
             raw_text=raw_text[:10000],  # Truncate for storage (keep first 10k chars)
             metadata={
                 "filename": filename,
                 "file_metadata": file_metadata,
-                "parser_version": "1.0.0",
-                "sections_found": list(sections.keys()),
+                "parser_version": "2.0.0-llm",
+                "extraction_method": "ollama_llm",
             }
         )
 
         self.logger.debug(
-            "Structured data extracted",
-            contact_count=len(contact_info),
-            education_count=len(education),
-            experience_count=len(experience),
-            skills_count=len(skills),
-            certifications_count=len(certifications),
+            "Structured data extracted via LLM",
+            contact_count=len(parsed_cv.contact_info),
+            education_count=len(parsed_cv.education),
+            experience_count=len(parsed_cv.experience),
+            skills_count=len(parsed_cv.skills),
+            certifications_count=len(parsed_cv.certifications),
         )
 
         return parsed_cv

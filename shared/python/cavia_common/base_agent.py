@@ -220,12 +220,13 @@ class BaseAgent(ABC):
             import requests
 
             # Call registry's /discover endpoint - ChromaDB handles embeddings!
+            # Get multiple results to filter out self
             registry_url = getattr(self.settings, 'registry_url', "http://agent-registry:8000")
             response = requests.post(
                 f"{registry_url}/agents/discover",
                 json={
                     "capability_query": capability_query,
-                    "limit": 1,
+                    "limit": 5,  # Get multiple results to filter
                 },
                 timeout=10,
             )
@@ -234,7 +235,19 @@ class BaseAgent(ABC):
             agents = response.json()
 
             if agents and len(agents) > 0:
-                best_match = agents[0]
+                # Filter out the calling agent to prevent self-enqueueing
+                current_agent_type = self.get_agent_type()
+                filtered_agents = [a for a in agents if a['agent_type'] != current_agent_type]
+
+                if not filtered_agents:
+                    self.logger.warning(
+                        "No suitable agent found (all matches were self)",
+                        capability=capability_query,
+                        current_agent=current_agent_type
+                    )
+                    return None
+
+                best_match = filtered_agents[0]
                 self.logger.info(
                     "Discovered next agent via ChromaDB",
                     capability=capability_query,

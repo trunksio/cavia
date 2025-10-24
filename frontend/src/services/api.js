@@ -101,4 +101,30 @@ export const healthCheck = async () => {
   return response.data;
 };
 
+/**
+ * Agent Registry
+ */
+export const listAgents = async () => {
+  const response = await api.get('/api/v1/agents');
+  return response.data;
+};
+
+export const getAgent = async (agentId) => {
+  const response = await api.get(`/api/v1/agents/${agentId}`);
+  return response.data;
+};
+
+/**
+ * RQ Queues
+ */
+export const listQueues = async () => {
+  const response = await api.get('/api/v1/queues');
+  return response.data;
+};
+
+export const getQueueDetails = async (queueName) => {
+  const response = await api.get(`/api/v1/queues/${queueName}`);
+  return response.data;
+};
+
 export default api;

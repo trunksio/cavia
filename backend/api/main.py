@@ -11,7 +11,7 @@ sys.path.insert(0, "/shared")
 
 from cavia_common import setup_logging, get_logger
 
-from routers import cv_router, jobs_router
+from routers import cv_router, jobs_router, agents_router, queues_router
 
 # Setup logging
 setup_logging()
@@ -38,6 +38,8 @@ app.add_middleware(
 # Include routers
 app.include_router(cv_router.router, prefix="/api/v1", tags=["CVs"])
 app.include_router(jobs_router.router, prefix="/api/v1", tags=["Jobs"])
+app.include_router(agents_router.router, prefix="/api/v1", tags=["Agents"])
+app.include_router(queues_router.router, prefix="/api/v1", tags=["Queues"])
 
 
 @app.get("/health")

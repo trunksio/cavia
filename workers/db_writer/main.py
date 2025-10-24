@@ -130,16 +130,17 @@ def update_job_result(payload: Dict[str, Any]) -> Dict[str, Any]:
             from sqlalchemy import text
 
             # Update cv_jobs with final result
+            result_json = json.dumps(result)
             query = text("""
                 UPDATE cv_jobs
                 SET
                     status = :status,
                     completed_at = NOW(),
-                    result = :result::jsonb,
+                    result = CAST(:result AS jsonb),
                     metadata = jsonb_set(
                         COALESCE(metadata, '{}'),
-                        '{final_report}',
-                        :result::jsonb
+                        '{report}',
+                        CAST(:result AS jsonb)
                     )
                 WHERE job_id = :job_id
             """)
@@ -149,7 +150,7 @@ def update_job_result(payload: Dict[str, Any]) -> Dict[str, Any]:
                 {
                     "job_id": job_id,
                     "status": status,
-                    "result": json.dumps(result),
+                    "result": result_json,
                 }
             )
             session.commit()

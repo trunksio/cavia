@@ -130,8 +130,10 @@ services:
 
   # RQ Dashboard (optional, for monitoring queues)
   rq-dashboard:
-    image: eoranged/rq-dashboard:latest
-    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: workers/rq_dashboard/Dockerfile
+    image: cavia-rq-dashboard:latest
     container_name: cavia-rq-dashboard
     environment:
       RQ_DASHBOARD_REDIS_URL: redis://redis:6379/0
@@ -142,6 +144,7 @@ services:
         condition: service_healthy
     networks:
       - cavia-network
+    restart: unless-stopped
 
   # Backend API Service
   backend-api:

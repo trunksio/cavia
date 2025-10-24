@@ -133,12 +133,13 @@ class ReporterAgent(BaseAgent):
             final_report = {
                 "job_id": job_id,
                 "overall_score": overall_score,
-                "decision": report_data["recommendation"],
+                "recommendation": report_data["recommendation"],
                 "decision_reasoning": report_data["rationale"],
                 "summary": report_data["summary"],
                 "strengths": report_data.get("strengths", []),
                 "concerns": report_data.get("concerns", []),
                 "markdown_path": markdown_path,
+                "storage_path": markdown_path,
             }
 
             execution_time = time.time() - start_time
@@ -373,7 +374,7 @@ class ReporterAgent(BaseAgent):
 
             # Enqueue to db-writer (non-agentic worker)
             job = db_queue.enqueue(
-                "db_writer.process_db_task",
+                "main.process_db_task",
                 task_dict,
                 job_timeout='5m',
                 result_ttl=3600,
