@@ -127,4 +127,73 @@ export const getQueueDetails = async (queueName) => {
   return response.data;
 };
 
+/**
+ * Workflow Templates
+ */
+export const listWorkflows = async () => {
+  const response = await api.get('/api/v1/workflows');
+  return response.data;
+};
+
+export const getWorkflow = async (workflowId) => {
+  const response = await api.get(`/api/v1/workflows/${workflowId}`);
+  return response.data;
+};
+
+export const getWorkflowsByCategory = async (category) => {
+  const response = await api.get(`/api/v1/workflows/category/${category}`);
+  return response.data;
+};
+
+export const listWorkflowCategories = async () => {
+  const response = await api.get('/api/v1/workflows/categories');
+  return response.data;
+};
+
+export const createIntentFromTemplate = async (workflowId, parameters) => {
+  const response = await api.post(`/api/v1/workflows/${workflowId}/intent`, {
+    workflow_id: workflowId,
+    parameters,
+  });
+  return response.data;
+};
+
+/**
+ * Document Upload with Structured Intent
+ */
+export const uploadDocumentWithIntent = async (file, intent, onProgress) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('intent', JSON.stringify(intent));
+
+  const response = await api.post('/api/v1/cvs/upload', formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+    onUploadProgress: (progressEvent) => {
+      if (onProgress) {
+        const percentCompleted = Math.round(
+          (progressEvent.loaded * 100) / progressEvent.total
+        );
+        onProgress(percentCompleted);
+      }
+    },
+  });
+
+  return response.data;
+};
+
+/**
+ * Intent Tracking and Validation
+ */
+export const getJobIntent = async (jobId) => {
+  const response = await api.get(`/api/v1/jobs/${jobId}/intent`);
+  return response.data;
+};
+
+export const getJobValidations = async (jobId) => {
+  const response = await api.get(`/api/v1/jobs/${jobId}/validations`);
+  return response.data;
+};
+
 export default api;

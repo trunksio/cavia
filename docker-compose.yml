@@ -315,6 +315,61 @@ services:
     networks:
       - cavia-network
 
+  # OCR Agent - DeepSeek-OCR for scanned/image-based CVs
+  ocr-agent:
+    build:
+      context: .
+      dockerfile: agents/ocr/Dockerfile
+    image: cavia-ocr:latest
+    container_name: cavia-ocr-agent
+    environment:
+      # Agent Config
+      AGENT_ID: ocr-001
+
+      # Infrastructure
+      DATABASE_URL: postgresql://cavia:${POSTGRES_PASSWORD:-caviadev123}@postgres:5432/cavia
+      REDIS_URL: redis://redis:6379/0
+
+      # MinIO
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+      MINIO_SECURE: "false"
+
+      # Ollama LLM (for structured extraction)
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2}
+
+      # GPU/CUDA settings
+      CUDA_VISIBLE_DEVICES: "0"
+      TOKENIZERS_PARALLELISM: "false"
+
+      # Logging
+      LOG_LEVEL: INFO
+    volumes:
+      - ocr-models:/root/.cache/huggingface
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      agent-registry:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - cavia-network
+
   # ============================================================================
   # NON-AGENTIC UNITS - Cross-boundary workers
   # ============================================================================
@@ -349,6 +404,8 @@ volumes:
   chromadb-data:
     driver: local
   ollama-data:
+    driver: local
+  ocr-models:
     driver: local
 
 networks:

@@ -2,6 +2,7 @@
 Shared data models for CAVIA
 """
 
+import uuid
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -117,16 +118,86 @@ class CVEvaluationReport(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+# ============================================================================
+# Intent Management Models
+# ============================================================================
+
+
+class IntentConstraint(BaseModel):
+    """A constraint or business rule for the intent"""
+
+    name: str = Field(..., description="Constraint name")
+    description: str = Field(..., description="Human-readable description")
+    value: Any = Field(..., description="Constraint value")
+    required: bool = Field(default=True, description="Is this constraint mandatory")
+    validation_rule: Optional[str] = Field(None, description="Optional validation expression")
+
+
+class IntentSuccessCriteria(BaseModel):
+    """Success criteria for validating intent completion"""
+
+    criterion: str = Field(..., description="Name of the success criterion")
+    description: str = Field(..., description="What this criterion measures")
+    validation_rule: str = Field(..., description="Rule to evaluate success (e.g., 'score >= 70')")
+    threshold: Optional[float] = Field(None, description="Numerical threshold if applicable")
+    required: bool = Field(default=True, description="Is meeting this criterion required for success")
+
+
+class StructuredIntent(BaseModel):
+    """Rich intent model for agent chains with goals, constraints, and success criteria"""
+
+    intent_id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique intent ID")
+    workflow_type: str = Field(..., description="Type of workflow (e.g., 'cv_evaluation', 'expense_evaluation')")
+    goal: str = Field(..., description="High-level goal of this intent")
+    context: Dict[str, Any] = Field(default_factory=dict, description="Additional context and parameters")
+    constraints: List[IntentConstraint] = Field(default_factory=list, description="Business rules and constraints")
+    success_criteria: List[IntentSuccessCriteria] = Field(default_factory=list, description="Criteria for successful completion")
+    current_stage: str = Field(default="initiated", description="Current stage in workflow")
+    parent_intent_id: Optional[str] = Field(None, description="Parent intent if this is a sub-intent")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class IntentValidation(BaseModel):
+    """Result of intent validation at an agent"""
+
+    validation_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    agent_id: str = Field(..., description="Agent that performed validation")
+    agent_type: str = Field(..., description="Type of agent")
+    is_aligned: bool = Field(..., description="Does agent's work align with intent?")
+    alignment_score: float = Field(..., ge=0.0, le=1.0, description="Alignment score 0-1")
+    drift_score: float = Field(..., ge=0.0, le=1.0, description="Drift from original intent 0-1 (0=no drift)")
+    reasoning: str = Field(..., description="Explanation of validation result")
+    suggestions: List[str] = Field(default_factory=list, description="Suggestions if drift detected")
+    validated_at: datetime = Field(default_factory=datetime.utcnow)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentTask(BaseModel):
-    """Task model for agent queue"""
+    """Task model for agent queue (legacy - uses string intent)"""
 
     task_id: str
     task_type: str
     payload: Dict[str, Any]
-    intent: str = Field(default="", description="Original intent/goal for this task chain")
+    intent: str = Field(default="", description="Original intent/goal for this task chain (legacy)")
     steps_completed: list[str] = Field(default_factory=list, description="List of agent types that have processed this task")
     metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AgentTaskV2(BaseModel):
+    """Enhanced task model with structured intent"""
+
+    task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    task_type: str = Field(..., description="Type of task for the agent")
+    payload: Dict[str, Any] = Field(..., description="Task-specific data")
+    intent: StructuredIntent = Field(..., description="Structured intent for this task chain")
+    intent_validations: List[IntentValidation] = Field(default_factory=list, description="Validation results from each agent")
+    steps_completed: List[str] = Field(default_factory=list, description="Agent types that have processed this")
+    current_agent: Optional[str] = Field(None, description="Current agent processing this task")
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class AgentTaskResult(BaseModel):

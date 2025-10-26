@@ -42,7 +42,8 @@
       "Bash(docker build:*)",
       "Bash(docker logs:*)",
       "WebSearch",
-      "Bash(nvidia-smi:*)"
+      "Bash(nvidia-smi:*)",
+      "WebFetch(domain:simonwillison.net)"
     ],
     "deny": [],
     "ask": []

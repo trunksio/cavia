@@ -15,6 +15,7 @@ sys.path.insert(0, "/shared")
 from cavia_common import (
     BaseAgent,
     AgentTask,
+    AgentTaskV2,
     AgentTaskResult,
     ParsedCV,
     get_logger,
@@ -82,9 +83,11 @@ class ParserAgent(BaseAgent):
             },
         }
 
-    def process_task(self, task: AgentTask) -> AgentTaskResult:
+    def process_task(self, task) -> AgentTaskResult:
         """
         Process a CV parsing task.
+
+        Supports both AgentTask (legacy) and AgentTaskV2 (with intent validation).
 
         Expected task payload:
         {
@@ -99,13 +102,57 @@ class ParserAgent(BaseAgent):
         """
         start_time = time.time()
 
+        # Detect task version
+        is_v2_task = isinstance(task, AgentTaskV2) or hasattr(task, 'intent_validations')
+
         try:
-            self.logger.info(
-                "Starting CV parsing",
-                task_id=task.task_id,
-                job_id=task.payload.get("job_id"),
-                filename=task.payload.get("filename"),
-            )
+            # INTENT VALIDATION - Step 1: Validate intent alignment
+            if is_v2_task:
+                self.logger.info(
+                    "Starting CV parsing with intent validation (AgentTaskV2)",
+                    task_id=task.task_id,
+                    job_id=task.payload.get("job_id"),
+                    filename=task.payload.get("filename"),
+                    intent_goal=task.intent.goal if hasattr(task.intent, 'goal') else "N/A",
+                )
+
+                # Validate intent alignment
+                validation = self.validate_intent(task)
+                task.intent_validations.append(validation)
+
+                self.logger.info(
+                    f"Intent validation completed: aligned={validation.is_aligned}, "
+                    f"alignment={validation.alignment_score:.2f}, drift={validation.drift_score:.2f}",
+                    task_id=task.task_id,
+                    is_aligned=validation.is_aligned,
+                    alignment_score=validation.alignment_score,
+                    drift_score=validation.drift_score,
+                )
+
+                # DRIFT CHECK - Step 2: Check if we've drifted too far
+                if self.check_intent_drift(task, threshold=0.4):
+                    self.logger.warning(
+                        "Intent drift detected! Stopping workflow to prevent busy work.",
+                        task_id=task.task_id,
+                        avg_drift=sum(v.drift_score for v in task.intent_validations) / len(task.intent_validations),
+                    )
+                    # Store drift detection in job metadata
+                    self._store_drift_detection(task.payload["job_id"], task.intent_validations)
+
+                    return AgentTaskResult(
+                        task_id=task.task_id,
+                        agent_id=self.agent_id,
+                        status="drift_detected",
+                        error="Intent drift detected - workflow stopped to prevent misaligned work",
+                        execution_time=time.time() - start_time,
+                    )
+            else:
+                self.logger.info(
+                    "Starting CV parsing (legacy AgentTask)",
+                    task_id=task.task_id,
+                    job_id=task.payload.get("job_id"),
+                    filename=task.payload.get("filename"),
+                )
 
             # Extract task parameters
             job_id = task.payload["job_id"]
@@ -142,6 +189,25 @@ class ParserAgent(BaseAgent):
                 storage_path = self._store_in_minio(job_id, parsed_cv)
 
                 execution_time = time.time() - start_time
+
+                # INTENT UPDATE - Step 3: Update intent context with results
+                if is_v2_task:
+                    self.update_intent_context(task, {
+                        "parsing_completed": True,
+                        "contact_extracted": len(parsed_cv.contact_info) > 0,
+                        "education_count": len(parsed_cv.education),
+                        "experience_count": len(parsed_cv.experience),
+                        "skills_count": len(parsed_cv.skills),
+                        "parser_agent": self.agent_id,
+                    })
+
+                    # Store updated validations in job metadata
+                    self._store_intent_validations(job_id, task.intent_validations)
+
+                    self.logger.info(
+                        "Intent context updated with parsing results",
+                        current_stage=task.intent.current_stage,
+                    )
 
                 self.logger.info(
                     "CV parsing completed successfully",
@@ -301,13 +367,114 @@ class ParserAgent(BaseAgent):
             self.logger.error("Failed to store ParsedCV in MinIO", error=str(e))
             raise
 
-    def _enqueue_to_evaluator(self, job_id: str, parsed_cv: ParsedCV, storage_path: str, task: AgentTask):
+    def _store_intent_validations(self, job_id: str, validations: list):
+        """Store intent validations in job metadata"""
+        try:
+            import json
+
+            with self.db.get_session() as session:
+                from sqlalchemy import text
+
+                query = text("""
+                    UPDATE cv_jobs
+                    SET metadata = jsonb_set(
+                        COALESCE(metadata, '{}'),
+                        '{intent_validations}',
+                        CAST(:validations AS jsonb)
+                    )
+                    WHERE job_id = :job_id
+                """)
+
+                validations_json = json.dumps([v.model_dump() if hasattr(v, 'model_dump') else v for v in validations])
+
+                session.execute(
+                    query,
+                    {
+                        "job_id": job_id,
+                        "validations": validations_json,
+                    }
+                )
+                session.commit()
+
+            self.logger.debug("Intent validations stored in database", job_id=job_id, count=len(validations))
+
+        except Exception as e:
+            self.logger.error("Failed to store intent validations", error=str(e))
+            # Don't raise - validation storage failure shouldn't stop workflow
+
+    def _store_drift_detection(self, job_id: str, validations: list):
+        """Store drift detection info in job metadata and update status"""
+        try:
+            import json
+
+            with self.db.get_session() as session:
+                from sqlalchemy import text
+
+                # Calculate drift metrics
+                avg_drift = sum(v.drift_score for v in validations) / len(validations) if validations else 0
+                max_drift = max(v.drift_score for v in validations) if validations else 0
+
+                # Store drift info and update status
+                query = text("""
+                    UPDATE cv_jobs
+                    SET
+                        status = 'failed',
+                        metadata = jsonb_set(
+                            jsonb_set(
+                                COALESCE(metadata, '{}'),
+                                '{intent_validations}',
+                                CAST(:validations AS jsonb)
+                            ),
+                            '{drift_detected}',
+                            CAST(:drift_info AS jsonb)
+                        )
+                    WHERE job_id = :job_id
+                """)
+
+                validations_json = json.dumps([v.model_dump() if hasattr(v, 'model_dump') else v for v in validations])
+                drift_info = json.dumps({
+                    "detected": True,
+                    "avg_drift": avg_drift,
+                    "max_drift": max_drift,
+                    "threshold": 0.4,
+                    "message": "Workflow stopped due to intent drift - agents not aligned with original goal"
+                })
+
+                session.execute(
+                    query,
+                    {
+                        "job_id": job_id,
+                        "validations": validations_json,
+                        "drift_info": drift_info,
+                    }
+                )
+                session.commit()
+
+            self.logger.info("Drift detection info stored", job_id=job_id, avg_drift=avg_drift, max_drift=max_drift)
+
+        except Exception as e:
+            self.logger.error("Failed to store drift detection", error=str(e))
+
+    def _enqueue_to_evaluator(self, job_id: str, parsed_cv: ParsedCV, storage_path: str, task):
         """Discover and enqueue to evaluator agent using semantic discovery"""
         try:
             import json
             import sys
 
             print(f"DEBUG: _enqueue_to_evaluator called for job {job_id}", file=sys.stderr, flush=True)
+
+            # Detect task version
+            is_v2_task = isinstance(task, AgentTaskV2) or hasattr(task, 'intent_validations')
+
+            # Build task parameters
+            if is_v2_task:
+                # For V2 tasks, pass the entire task forward (with intent and validations)
+                intent_param = task.intent
+                validations_param = task.intent_validations
+            else:
+                # For legacy tasks, use string intent
+                intent_param = task.intent or "Process CV and determine acceptance"
+                validations_param = None
 
             # Use semantic discovery to find evaluator agent
             print(f"DEBUG: About to call enqueue_to_next_agent", file=sys.stderr, flush=True)
@@ -319,8 +486,9 @@ class ParserAgent(BaseAgent):
                     "parsed_cv": json.loads(parsed_cv.model_dump_json()),
                     "storage_path": storage_path,
                 },
-                intent=task.intent or "Process CV and determine acceptance",
-                steps_completed=task.steps_completed
+                intent=intent_param,
+                steps_completed=task.steps_completed,
+                intent_validations=validations_param  # Pass validations forward
             )
 
             print(f"DEBUG: enqueue_to_next_agent returned: {job_id_result}", file=sys.stderr, flush=True)

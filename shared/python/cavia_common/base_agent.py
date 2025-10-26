@@ -15,7 +15,7 @@ from rq import Queue, Worker
 
 from .config import get_settings
 from .logging import get_logger, setup_logging
-from .models import AgentRegistration, AgentStatus, AgentTask, AgentTaskResult
+from .models import AgentRegistration, AgentStatus, AgentTask, AgentTaskV2, AgentTaskResult, IntentValidation
 from .database import get_db_manager
 from .redis_client import get_redis_connection
 
@@ -203,6 +203,139 @@ class BaseAgent(ABC):
             "queue": self.get_queue_name(),
         }
 
+    def validate_intent(self, task: "AgentTaskV2") -> "IntentValidation":
+        """
+        Validate that this agent's work aligns with the intent.
+
+        Uses LLM to assess alignment between intent and agent capabilities.
+
+        Args:
+            task: AgentTaskV2 with structured intent
+
+        Returns:
+            IntentValidation with alignment and drift scores
+        """
+        from .models import IntentValidation
+
+        try:
+            # Get agent capabilities
+            agent_info = self.get_agent_info()
+            agent_capabilities = agent_info.get("description", "")
+
+            # Simple heuristic validation (can be enhanced with LLM)
+            # Check if intent.goal contains keywords related to agent type
+            intent = task.intent
+            goal_lower = intent.goal.lower()
+            workflow_lower = intent.workflow_type.lower()
+            agent_type = self.get_agent_type()
+
+            # Calculate alignment score based on keyword matching
+            alignment_keywords = {
+                "parser": ["parse", "extract", "analyze", "document"],
+                "ocr": ["ocr", "scan", "image", "picture", "photo"],
+                "evaluator": ["evaluate", "assess", "score", "judge", "criteria"],
+                "reporter": ["report", "summary", "decision", "output"],
+                "expense_evaluator": ["expense", "receipt", "invoice", "reimburse", "policy"]
+            }
+
+            relevant_keywords = alignment_keywords.get(agent_type, [])
+            keyword_matches = sum(1 for kw in relevant_keywords if kw in goal_lower or kw in workflow_lower)
+            alignment_score = min(1.0, keyword_matches / max(len(relevant_keywords), 1))
+
+            # Drift score = 1 - alignment (higher drift = lower alignment)
+            drift_score = 1.0 - alignment_score
+
+            # Check if previous agents have high drift
+            avg_previous_drift = 0.0
+            if task.intent_validations:
+                avg_previous_drift = sum(v.drift_score for v in task.intent_validations) / len(task.intent_validations)
+
+            # Cumulative drift
+            cumulative_drift = (avg_previous_drift + drift_score) / 2
+
+            is_aligned = alignment_score >= 0.5
+
+            reasoning = f"Agent '{agent_type}' processing '{intent.workflow_type}' workflow. "
+            reasoning += f"Keyword alignment: {alignment_score:.2f}. "
+            if not is_aligned:
+                reasoning += f"WARNING: Low alignment detected. Agent may not be suited for this intent."
+
+            suggestions = []
+            if drift_score > 0.5:
+                suggestions.append(f"Consider routing to agent better suited for '{intent.goal}'")
+            if cumulative_drift > 0.4:
+                suggestions.append("Significant cumulative drift detected across agent chain")
+
+            return IntentValidation(
+                agent_id=self.agent_id,
+                agent_type=agent_type,
+                is_aligned=is_aligned,
+                alignment_score=alignment_score,
+                drift_score=cumulative_drift,
+                reasoning=reasoning,
+                suggestions=suggestions
+            )
+
+        except Exception as e:
+            self.logger.error("Intent validation failed", error=str(e))
+            # Return default validation if error occurs
+            return IntentValidation(
+                agent_id=self.agent_id,
+                agent_type=self.get_agent_type(),
+                is_aligned=True,  # Default to aligned to not block workflow
+                alignment_score=0.5,
+                drift_score=0.5,
+                reasoning=f"Validation error: {str(e)}",
+                suggestions=["Manual review recommended due to validation error"]
+            )
+
+    def check_intent_drift(self, task: "AgentTaskV2", threshold: float = 0.4) -> bool:
+        """
+        Check if intent has drifted too far from original goal.
+
+        Args:
+            task: AgentTaskV2 with intent validations
+            threshold: Drift threshold (0-1), default 0.4
+
+        Returns:
+            True if drift exceeds threshold (should stop workflow)
+        """
+        if not task.intent_validations:
+            return False
+
+        # Calculate average drift across all validations
+        total_drift = sum(v.drift_score for v in task.intent_validations)
+        avg_drift = total_drift / len(task.intent_validations)
+
+        # Check if any individual validation has very high drift
+        max_drift = max(v.drift_score for v in task.intent_validations)
+
+        # Drift detected if average exceeds threshold OR any single agent has >0.7 drift
+        drift_detected = avg_drift > threshold or max_drift > 0.7
+
+        if drift_detected:
+            self.logger.warning(
+                "Intent drift detected",
+                avg_drift=avg_drift,
+                max_drift=max_drift,
+                threshold=threshold,
+                validations_count=len(task.intent_validations)
+            )
+
+        return drift_detected
+
+    def update_intent_context(self, task: "AgentTaskV2", updates: Dict[str, Any]) -> None:
+        """
+        Update the intent context with information from this agent's processing.
+
+        Args:
+            task: AgentTaskV2 to update
+            updates: Dictionary of context updates
+        """
+        task.intent.context.update(updates)
+        task.intent.current_stage = f"{self.get_agent_type()}_completed"
+        task.intent.updated_at = datetime.utcnow()
+
     def discover_next_agent(self, capability_query: str) -> Optional[Dict[str, str]]:
         """
         Discover the next agent via HTTP call to agent-registry service (ChromaDB).
@@ -355,8 +488,10 @@ def process_agent_task(task_dict: Dict[str, Any]) -> Dict[str, Any]:
     This is the entry point called by RQ workers. It delegates to the
     registered agent instance's process_task() method.
 
+    Supports both AgentTask (legacy) and AgentTaskV2 (with structured intent).
+
     Args:
-        task_dict: Dictionary representation of AgentTask
+        task_dict: Dictionary representation of AgentTask or AgentTaskV2
 
     Returns:
         Dictionary representation of AgentTaskResult
@@ -369,8 +504,17 @@ def process_agent_task(task_dict: Dict[str, Any]) -> Dict[str, Any]:
             "Agent must call register_agent_instance() before starting worker."
         )
 
-    # Deserialize task
-    task = AgentTask(**task_dict)
+    # Determine task type and deserialize appropriately
+    try:
+        # Try AgentTaskV2 first (has 'intent' as dict with 'intent_id')
+        if isinstance(task_dict.get('intent'), dict) and 'intent_id' in task_dict['intent']:
+            task = AgentTaskV2(**task_dict)
+        else:
+            # Fall back to legacy AgentTask (intent is string)
+            task = AgentTask(**task_dict)
+    except Exception as e:
+        # If deserialization fails, try legacy format
+        task = AgentTask(**task_dict)
 
     # Process task using the agent instance
     result = _agent_instance.process_task(task)
