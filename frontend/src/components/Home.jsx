@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import CVUpload from './CVUpload';
+import WorkflowUpload from './WorkflowUpload';
 import JobsList from './JobsList';
 import AgentsView from './AgentsView';
 import QueuesView from './QueuesView';
@@ -70,7 +70,7 @@ const Home = () => {
           <div className="grid lg:grid-cols-3 gap-8">
             {/* Left Column - Upload */}
             <div className="lg:col-span-1">
-              <CVUpload onUploadSuccess={handleUploadSuccess} />
+              <WorkflowUpload onUploadSuccess={handleUploadSuccess} />
             </div>
 
             {/* Right Column - Jobs List */}

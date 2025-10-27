@@ -1,6 +1,7 @@
 import React from 'react';
 import { useParams } from 'react-router-dom';
 import JobStatusCard from './JobStatusCard';
+import IntentTracker from './IntentTracker';
 
 const JobDetailPage = () => {
   const { jobId } = useParams();
@@ -24,7 +25,10 @@ const JobDetailPage = () => {
 
       {/* Main Content */}
       <main className="max-w-4xl mx-auto px-6 py-8">
-        <JobStatusCard jobId={jobId} autoRefresh={true} />
+        <div className="space-y-6">
+          <JobStatusCard jobId={jobId} autoRefresh={true} />
+          <IntentTracker jobId={jobId} />
+        </div>
       </main>
     </div>
   );
